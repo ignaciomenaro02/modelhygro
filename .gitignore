@@ -1,0 +1,7 @@
+Plaintext
+__pycache__/
+*.pyc
+.venv/
+.env
+.vscode/
+*.pdf
