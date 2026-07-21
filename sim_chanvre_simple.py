@@ -329,77 +329,111 @@ plt.close(fig)
 print("  [OK] chanvre_4graphiques.pdf")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# FIGURE 2 — Vue 3D "Beton de chanvre"
+# FIGURE 2 — Vue 3D "Beton de chanvre" — parois jointes, echelle reelle
 # ══════════════════════════════════════════════════════════════════════════════
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 sim_ete = ete["sim"]
+
+# Dimensions interieures de la piece [m]
 Lx, Ly, H = 10.0, 8.0, 2.7
-cx, cy     = Lx / 2.0, Ly / 2.0
-mag        = 5.0    # epaisseur x5 pour la visibilite
+t = 0.30   # epaisseur reelle du mur (pas de magnification)
 
-# Couleur unique : chanvre vert naturel
-MAT_COLOR = {"Hempcrete": "#8BB04A"}
+# Couleurs
+C_CHANVRE  = "#8BB04A"   # vert chanvre — murs
+C_INTERIEUR = "#F5F0E8"  # creme pale  — air interieur
+C_SOL      = "#D9CDB5"   # beige       — dalle sol
+C_VITRE    = "#AED6F1"   # bleu ciel   — vitrage
 
-def _placement(orient, width):
-    o = orient.lower()
-    if o == "s":  return (np.array([cx-width/2, 0,  0]), np.array([width,0,0]), np.array([0,0,H]), np.array([ 0,-1,0]))
-    if o == "n":  return (np.array([cx-width/2, Ly, 0]), np.array([width,0,0]), np.array([0,0,H]), np.array([ 0, 1,0]))
-    if o == "e":  return (np.array([Lx, cy-width/2, 0]), np.array([0,width,0]), np.array([0,0,H]), np.array([ 1, 0,0]))
-    if o == "w":  return (np.array([0,  cy-width/2, 0]), np.array([0,width,0]), np.array([0,0,H]), np.array([-1, 0,0]))
-    return (np.array([cx-width/2, 0, 0]), np.array([width,0,0]), np.array([0,0,H]), np.array([0,-1,0]))
 
-def _slab(P, u, v, n, d0, d1):
-    c = []
-    for d in (d0, d1):
-        for a, b in ((0,0),(1,0),(1,1),(0,1)):
-            c.append(P + a*u + b*v + d*n)
-    c = np.array(c)
-    return [c[f] for f in [[0,1,2,3],[4,5,6,7],[0,1,5,4],[1,2,6,5],[2,3,7,6],[3,0,4,7]]]
+def box_faces(x0, x1, y0, y1, z0, z1):
+    """Retourne les 6 faces d'un parallelepipede."""
+    v = np.array([
+        [x0,y0,z0],[x1,y0,z0],[x1,y1,z0],[x0,y1,z0],  # bas
+        [x0,y0,z1],[x1,y0,z1],[x1,y1,z1],[x0,y1,z1],  # haut
+    ])
+    return [v[f] for f in [
+        [0,1,2,3],[4,5,6,7],   # dessus/dessous
+        [0,1,5,4],[1,2,6,5],   # faces laterales
+        [2,3,7,6],[3,0,4,7],
+    ]]
 
-fig3d = plt.figure(figsize=(11, 8), facecolor="white")
+
+def add_box(ax, x0,x1,y0,y1,z0,z1, color, alpha=0.90, ec="#333333", lw=0.4):
+    faces = box_faces(x0,x1,y0,y1,z0,z1)
+    poly  = Poly3DCollection(faces, alpha=alpha, facecolor=color,
+                             edgecolor=ec, linewidths=lw, zsort="min")
+    ax.add_collection3d(poly)
+
+
+fig3d = plt.figure(figsize=(12, 8), facecolor="white")
 ax3d  = fig3d.add_subplot(111, projection="3d")
-ax3d.set_facecolor("#F8F8F8")
+ax3d.set_facecolor("#FAFAFA")
 
-ORIENT_LABEL = {"S": "Sud", "N": "Nord", "E": "Est", "W": "Ouest"}
+# ── Dalle sol (interieur) ──────────────────────────────────────────────────────
+add_box(ax3d, -t, Lx+t, -t, Ly+t, -0.05, 0,
+        color=C_SOL if False else "#C8B99A", alpha=0.85, ec="#999999")
 
-for cfg, layer in zip(sim_ete.wall_configs, sim_ete.layers):
-    width = max(cfg.area / H, 1.0)
-    P, u, v, n = _placement(cfg.orientation, width)
-    thk  = float(layer.emat[0]) * mag
-    faces = _slab(P, u, v, n, 0, thk)
-    poly  = Poly3DCollection(faces, alpha=0.88,
-                             facecolor=MAT_COLOR["Hempcrete"],
-                             edgecolor="#4A6820", linewidths=0.5)
-    ax3d.add_collection3d(poly)
-    # Etiquette sur la face exterieure
-    centre = P + 0.5*u + 0.5*v + thk*n
-    label  = ORIENT_LABEL.get(cfg.orientation.upper(), cfg.orientation)
-    ax3d.text(*centre,
-              f"{label}\n{layer.emat[0]*100:.0f} cm\nU={layer.U_value():.2f} W/m2K",
-              fontsize=9, ha="center", va="center", color="white", fontweight="bold")
+# ── 4 murs joincts aux coins — epaisseur reelle 30 cm ─────────────────────────
+# Convention : S/N couvrent les angles complets (x de -t a Lx+t)
+#              E/W remplissent entre les murs S et N (y de 0 a Ly)
+walls_3d = [
+    # (nom,      x0,    x1,    y0,   y1,    label_x, label_y, label_z)
+    ("Sud",   -t,   Lx+t,  -t,   0,    Lx/2,   -t/2,   H/2),
+    ("Nord",  -t,   Lx+t,  Ly,   Ly+t, Lx/2,   Ly+t/2, H/2),
+    ("Ouest", -t,   0,     0,    Ly,   -t/2,   Ly/2,   H/2),
+    ("Est",   Lx,   Lx+t,  0,    Ly,   Lx+t/2, Ly/2,   H/2),
+]
 
-# Boite de la piece (contour fin)
-for xs, ys, zs in [
-    ([0,Lx,Lx,0,0],[0,0,0,0,0],[0,0,H,H,0]),
-    ([0,Lx,Lx,0,0],[Ly,Ly,Ly,Ly,Ly],[0,0,H,H,0]),
-    ([0,0],[0,0],[0,H]), ([Lx,Lx],[0,0],[0,H]),
-    ([0,0],[Ly,Ly],[0,H]), ([Lx,Lx],[Ly,Ly],[0,H]),
-]:
-    ax3d.plot(xs, ys, zs, color="#AAAAAA", lw=0.8, ls="--")
+for nom, x0, x1, y0, y1, lx, ly, lz in walls_3d:
+    add_box(ax3d, x0, x1, y0, y1, 0, H, color=C_CHANVRE, alpha=0.92)
+    ax3d.text(lx, ly, lz,
+              f"{nom}\n30 cm",
+              ha="center", va="center", fontsize=10, fontweight="bold",
+              color="white",
+              bbox=dict(boxstyle="round,pad=0.15", fc=C_CHANVRE,
+                        ec="none", alpha=0.0))
+
+# ── Volume interieur (transparent pour voir l'interieur) ─────────────────────
+add_box(ax3d, 0, Lx, 0, Ly, 0, H,
+        color=C_INTERIEUR, alpha=0.12, ec="#BBBBBB", lw=0.5)
+
+# ── Vitrage Sud (8 m2, represente au centre de la facade Sud) ─────────────────
+w_vit = 3.0;  h_vit = 1.4   # dimensions approximatives
+xv0 = Lx/2 - w_vit/2;  xv1 = Lx/2 + w_vit/2
+zv0 = 0.9;               zv1 = zv0 + h_vit
+vit_verts = np.array([
+    [xv0, 0, zv0],[xv1, 0, zv0],[xv1, 0, zv1],[xv0, 0, zv1]
+])
+ax3d.add_collection3d(
+    Poly3DCollection([vit_verts], alpha=0.45, facecolor=C_VITRE,
+                     edgecolor="#2980B9", linewidths=1.0))
+
+# ── Axes et mise en forme ─────────────────────────────────────────────────────
+ax3d.set_xlim(-t, Lx+t)
+ax3d.set_ylim(-t, Ly+t)
+ax3d.set_zlim(0, H)
+ax3d.set_xlabel("x [m]", fontsize=10, labelpad=6)
+ax3d.set_ylabel("y [m]", fontsize=10, labelpad=6)
+ax3d.set_zlabel("z [m]", fontsize=10, labelpad=4)
+
+# Ratio visuel realiste
+ax3d.set_box_aspect((Lx + 2*t, Ly + 2*t, H))
+ax3d.view_init(elev=25, azim=-50)
 
 # Legende
-patch = mpatches.Patch(color=MAT_COLOR["Hempcrete"], label="Beton de chanvre 30 cm")
-ax3d.legend(handles=[patch], loc="upper left", fontsize=11,
-            title="Materiau", title_fontsize=10)
+patch_mur = mpatches.Patch(color=C_CHANVRE,   label="Beton de chanvre 30 cm")
+patch_vit = mpatches.Patch(color=C_VITRE,     label="Vitrage Sud 8 m2")
+ax3d.legend(handles=[patch_mur, patch_vit], loc="upper left",
+            fontsize=10, framealpha=0.9)
 
-ax3d.set_xlabel("x [m]"); ax3d.set_ylabel("y [m]"); ax3d.set_zlabel("z [m]")
-ax3d.set_title("Piece — Beton de chanvre 30 cm\n"
-               f"4 parois  |  U = {sim_ete.layers[0].U_value():.3f} W/(m2.K)  "
-               f"|  Epaisseur affichee x{mag:.0f}",
-               fontsize=12, fontweight="bold")
-ax3d.set_box_aspect((Lx, Ly, H))
-ax3d.view_init(elev=22, azim=-50)
+U_val = sim_ete.layers[0].U_value()
+ax3d.set_title(
+    f"Piece — Beton de chanvre 30 cm\n"
+    f"Dimensions interieures {Lx:.0f} x {Ly:.0f} x {H:.1f} m   "
+    f"|   U paroi = {U_val:.3f} W/(m2.K)",
+    fontsize=12, fontweight="bold"
+)
 
 fig3d.savefig(os.path.join(DIR, "chanvre_3d.pdf"), dpi=150)
 plt.close(fig3d)
