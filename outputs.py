@@ -24,6 +24,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import seaborn as sns
+import library as lib
 
 sns.set_style("whitegrid")
 COLORS = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
@@ -541,6 +542,133 @@ def plot_walls_3d(sim, mag: float = 3.0, room=(5.0, 4.0, 2.7), save=None):
 # ══════════════════════════════════════════════════════════════════════════════
 # CSV export
 # ══════════════════════════════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Profils hygro-thermiques détaillés dans une paroi
+# ══════════════════════════════════════════════════════════════════════════════
+
+def plot_wall_hygrothermal_profiles(sim, snapshots, wall_index=0, save=None):
+    """
+    Profils de T, HR, Pv et flux de chaleur à travers une paroi,
+    à plusieurs instants donnés.
+
+    Parameters
+    ----------
+    sim        : RoomSimulation   Simulation terminée.
+    snapshots  : list of (label, step, linestyle)
+                 Chaque élément = un instant à tracer.
+                 label    : str   Légende (ex. 'J35 14h')
+                 step     : int   Indice de temps dans StockT/StockRH
+                 linestyle: str   'solid', 'dashed', 'dotted'
+    wall_index : int   Index de la paroi dans sim.wall_configs (0 = Sud).
+    save       : str   Chemin de sauvegarde (ex. 'profils_sud.pdf').
+
+    Sorties (4 sous-figures) :
+    --------------------------
+    ① Température T [°C] le long de la paroi
+    ② Humidité relative HR [%]
+    ③ Pression de vapeur Pv [Pa]
+    ④ Flux de chaleur sensible q_s [W/m²]  + flux latent q_l [W/m²]
+       (trait plein = sensible, zone hachurée = latent, flux + = vers intérieur)
+    """
+    cfg      = sim.wall_configs[wall_index]
+    layer    = sim.layers[wall_index]
+    wall_obj = sim.walls[wall_index]
+
+    x_nod = layer.x_pos * 100.0    # positions des noeuds [cm]
+    dx    = layer.dx.flatten()      # [m]
+    N     = layer.N_tot
+
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    ax_T, ax_HR, ax_Pv, ax_Q = axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1]
+
+    for idx, (label, step, ls) in enumerate(snapshots):
+        si   = min(step, len(wall_obj.StockT) - 1)
+        T_K  = wall_obj.StockT[si].flatten()    # [K]
+        RH   = wall_obj.StockRH[si].flatten()   # [-]
+        T_C  = T_K - 273.15
+        HR   = RH * 100.0
+        Pv   = lib.Pv(T_K.reshape(-1, 1), RH.reshape(-1, 1)).flatten()   # [Pa]
+
+        col = colors[idx % len(colors)]
+
+        # ① T
+        ax_T.plot(x_nod, T_C, lw=1.4, color=col, ls=ls, label=label)
+
+        # ② HR
+        ax_HR.plot(x_nod, HR, lw=1.4, color=col, ls=ls, label=label)
+
+        # ③ Pv
+        ax_Pv.plot(x_nod, Pv, lw=1.4, color=col, ls=ls, label=label)
+
+        # ④ Flux à chaque interface entre noeuds i et i+1
+        k_f  = layer.k(T_K.reshape(-1,1), RH.reshape(-1,1)).flatten()
+        dp_f = layer.delta_p(T_K.reshape(-1,1), RH.reshape(-1,1)).flatten()
+        Pv_f = Pv
+
+        x_mid  = np.zeros(N - 1)
+        q_sens = np.zeros(N - 1)
+        q_lat  = np.zeros(N - 1)
+        for j in range(N - 1):
+            dxj       = dx[j + 1] if dx[j + 1] > 0 else 1e-4
+            k_eff     = 0.5 * (k_f[j]  + k_f[j + 1])
+            dp_eff    = 0.5 * (dp_f[j] + dp_f[j + 1])
+            q_sens[j] = -k_eff  * (T_K[j+1]  - T_K[j])  / dxj       # [W/m²]
+            g_v       = -dp_eff * (Pv_f[j+1] - Pv_f[j]) / dxj        # [kg/m²/s]
+            q_lat[j]  = lib.Lv * g_v                                   # [W/m²]
+            x_mid[j]  = 0.5 * (x_nod[j] + x_nod[j + 1])
+
+        q_tot = q_sens + q_lat
+        ax_Q.plot(x_mid, q_sens, lw=1.4, color=col, ls=ls, label=f'{label} — sensible')
+        ax_Q.fill_between(x_mid, q_sens, q_tot, color=col, alpha=0.18,
+                          label='_nolegend_')
+        ax_Q.plot(x_mid, q_tot, lw=0.7, color=col, ls=ls, alpha=0.5,
+                  label='_nolegend_')
+
+    # Ligne de séparation des couches
+    for ax in (ax_T, ax_HR, ax_Pv, ax_Q):
+        for xb in layer.interface_pos[:-1] * 100:
+            ax.axvline(xb, ls=':', lw=0.8, color='gray', alpha=0.6)
+        ax.text(0.02, 0.96, 'EXT', transform=ax.transAxes,
+                fontsize=8, color='gray', va='top')
+        ax.text(0.98, 0.96, 'INT', transform=ax.transAxes,
+                fontsize=8, color='gray', va='top', ha='right')
+        ax.set_xlabel('Position [cm]', fontsize=11)
+
+    ax_Q.axhline(0, lw=0.6, color='black', alpha=0.4)
+
+    ax_T.set_ylabel('T [°C]', fontsize=11)
+    ax_T.set_title('Température', fontsize=11)
+    ax_T.legend(fontsize=8)
+
+    ax_HR.set_ylabel('HR [%]', fontsize=11)
+    ax_HR.set_title('Humidité relative', fontsize=11)
+    ax_HR.set_ylim(0, 100)
+    ax_HR.legend(fontsize=8)
+
+    ax_Pv.set_ylabel('Pv [Pa]', fontsize=11)
+    ax_Pv.set_title('Pression de vapeur', fontsize=11)
+    ax_Pv.legend(fontsize=8)
+
+    ax_Q.set_ylabel('Flux [W/m²]', fontsize=11)
+    ax_Q.set_title('Flux sensible (trait) + latent (zone)  [+ = vers int.]',
+                   fontsize=11)
+    ax_Q.legend(fontsize=8)
+
+    mat_str = ' + '.join(
+        f'{m} {e*100:.0f}cm' for m, e in zip(layer.mat, layer.emat))
+    fig.suptitle(
+        f'Profils hygro-thermiques — Paroi {cfg.name}  [{mat_str}]',
+        fontsize=13, y=1.01)
+
+    plt.tight_layout()
+    if save:
+        _safe_savefig(fig, save, dpi=150, bbox_inches='tight')
+    plt.show()
+    return fig
+
 
 def export_csv(sim, filepath: str = 'results.csv', dt: int = 3600):
     """

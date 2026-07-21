@@ -32,6 +32,46 @@ from dataclasses import dataclass, field
 from typing import List
 
 
+def hm_lewis(h_conv: float, T_ref: float = 293.15) -> float:
+    """
+    Convective moisture transfer coefficient from the Lewis analogy [kg/(m²·s·Pa)].
+
+    Lewis relation (Le ≈ 1 for air/water-vapour):
+        hm = h / (rho_air × Cp_air) × Mw / (R × T)
+
+    where the first factor (h / rho_air / Cp_air) converts a HEAT transfer
+    coefficient [W/(m²K)] into a MASS transfer velocity [m/s], and the
+    second factor converts that velocity into a vapour-pressure-based
+    permeance [kg/(m²·s·Pa)] via the ideal-gas law for water vapour.
+
+    Parameters
+    ----------
+    h_conv : float   Convective heat transfer coefficient [W/(m²·K)].
+                     Typical values: exterior h = 25 W/(m²K) (wind, ISO 6946),
+                                     interior h = 8  W/(m²K) (still air, ISO 6946).
+    T_ref  : float   Reference temperature [K]. Default 293.15 K (20 °C).
+
+    Returns
+    -------
+    hm : float   Moisture transfer coefficient [kg/(m²·s·Pa)].
+
+    Examples
+    --------
+    >>> hm_lewis(25.0)   # exterior surface
+    1.53e-7              # kg/(m²·s·Pa)
+    >>> hm_lewis(8.0)    # interior surface
+    4.91e-8              # kg/(m²·s·Pa)
+
+    Reference: Künzel (1995), Simultaneous Heat and Moisture Transport in
+    Building Components, §2.3; ASHRAE Fundamentals Ch.6 (Lewis relation).
+    """
+    rho_air = 1.2       # [kg/m³]    dry air at ~20 °C, sea level
+    Cp_air  = 1004.0    # [J/(kg·K)]
+    Mw      = 18.015e-3 # [kg/mol]   molar mass of water
+    R       = 8.314     # [J/(mol·K)] universal gas constant
+    return h_conv * Mw / (rho_air * Cp_air * R * T_ref)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Wall
 # ══════════════════════════════════════════════════════════════════════════════
