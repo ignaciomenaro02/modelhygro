@@ -196,6 +196,44 @@ class HVACConfig:
     f_ep            : float  = 2.3     # RE2020 primary energy factor
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Vapour source (plants, cooking, drying laundry, humidifier…)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class VaporSourceConfig:
+    """
+    Explicit internal moisture source independent of occupants.
+
+    Parameters
+    ----------
+    rate_g_h  : float   Vapour emission rate [g/h].
+                        Typical values:
+                          Cooking (active)     : 400–700 g/h
+                          10 indoor plants     :  50–150 g/h
+                          Drying laundry       : 100–300 g/h
+                          Humidifier (domestic):  200–500 g/h
+    schedule  : list    Hourly factor [0–1] over the simulation.
+                        None = constant emission.
+
+    The latent heat added to the room air is:
+        Q_lat [W] = rate_g_h / 3600 / 1000 * Lv   (Lv = 2.5e6 J/kg)
+    """
+    rate_g_h : float                   = 100.0   # [g/h]
+    schedule : Optional[List[float]]   = None
+
+    _Lv : float = 2.5e6   # [J/kg]
+
+    def moisture_at(self, step: int) -> float:
+        """Vapour mass flow [kg/s] at step `step`."""
+        factor = self.schedule[step] if self.schedule is not None else 1.0
+        return self.rate_g_h * factor / 3600.0 / 1000.0
+
+    def latent_heat_at(self, step: int) -> float:
+        """Latent heat added to room air [W] at step `step`."""
+        return self.moisture_at(step) * self._Lv
+
+
 def build_daily_schedule(
     hours_on: list,
     n_steps: int,

@@ -5,14 +5,14 @@ wall_layer.py
 WallLayer — geometry, mesh, and material property evaluation.
 The mesh is built directly inside each WallLayer instance (no global mesh.py).
 
-Usage
------
-    layer = WallLayer(
-        mat      = ["Hempcrete", "Rammed_Earth"],
-        emat     = [0.20, 0.30],
-        Mesh_Opt = 0,
-        liq      = 0,
-        label    = "South wall",
+    Usage
+    -----
+        layer = WallLayer(
+            mat      = ["Hempcrete", "Rammed_Earth"],
+            emat     = [0.20, 0.30],
+            Mesh_Opt = 0,
+            liq      = 0,
+            label    = "South wall",
     )
     k_field = layer.k(T, RH)    # (N_tot, 1) array
 

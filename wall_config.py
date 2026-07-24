@@ -137,10 +137,6 @@ def make_wall(name, area, orientation='S', layers=None, **kwargs):
     """
     Easy way to build a wall from a compact list of layers.
 
-    Instead of writing parallel `mat=[...]` and `emat=[...]` lists, you give
-    one list of (material, thickness) pairs, ordered exterior -> interior.
-    Material names are checked against the registry, so a typo gives a clear
-    error listing the available materials.
 
     Parameters
     ----------

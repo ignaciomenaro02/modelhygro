@@ -84,6 +84,7 @@ class RoomSimulation:
         T_room_init     = 20.0,
         RH_room_init    = 0.50,
         re2020          = None,
+        vapor_sources   = None,   # list of VaporSourceConfig
     ):
         self.wall_configs   = wall_configs
         self.window_configs = window_configs  or []
@@ -100,6 +101,7 @@ class RoomSimulation:
         # Added to the air heat capacity; gives the room realistic inertia.
         self.internal_mass  = float(internal_mass)
         self.re2020_ev      = re2020
+        self.vapor_sources  = vapor_sources or []
 
         # Room state
         self.T_room  = float(T_room_init)    # [°C]
@@ -142,6 +144,11 @@ class RoomSimulation:
             cfg.name: [float(wall.T[-1, 0]) - 273.15]
             for cfg, wall in zip(wall_configs, self.walls)
         }
+        # Per-wall sensible heat flux wall→room [W]  (h_int·A·(T_surf−T_room))
+        # positive = heat flowing INTO the room from that wall
+        self.StockQ_sens_walls = {cfg.name: [0.0] for cfg in wall_configs}
+        # Total latent heat flux all walls→room [W]  (Lv·Σhm·A·(Pv_surf−Pv_room))
+        self.StockQ_lat_total  = [0.0]
 
         # Energy accumulators [kWh]
         self.E_heat_kWh = 0.0
@@ -168,9 +175,13 @@ class RoomSimulation:
         # Thermal flux is  Σ h_int·A·(T_surf − T_room).  We split it into a
         # conductance G_walls_th [W/K] and a "drive" Σ h_int·A·T_surf so the air
         # temperature can be solved IMPLICITLY below (stable at any time step).
-        G_walls_th   = 0.0   # [W/K]  air↔walls thermal conductance
-        Qdrive_walls = 0.0   # [W]    Σ h_int·A·T_surf
-        G_walls      = 0.0   # [kg/s] vapour from walls into the room (moisture)
+        G_walls_th    = 0.0   # [W/K]  air↔walls thermal conductance
+        Qdrive_walls  = 0.0   # [W]    Σ h_int·A·T_surf
+        G_mois_cond   = 0.0   # [kg/(s·Pa)] moisture conductance (implicit)
+        G_mois_drive  = 0.0   # [kg/s]      moisture drive (independent of Pv_room)
+        Glat_cond_w   = 0.0   # [kg/(s·Pa)]  Σ hm_int·A        (walls only)
+        Glat_drive_w  = 0.0   # [kg/s]       Σ hm_int·A·Pv_surf (walls only)
+        _q_sens_walls = []    # per-wall sensible flux [W] for this step
 
         for wall_obj, cfg in zip(self.walls, self.wall_configs):
             T_surf  = float(wall_obj.T[-1, 0])    # interior surface [K]
@@ -179,7 +190,12 @@ class RoomSimulation:
 
             G_walls_th   += cfg.h_int  * cfg.area
             Qdrive_walls += cfg.h_int  * cfg.area * T_surf
-            G_walls      += cfg.hm_int * cfg.area * (Pv_surf - Pv_room)
+            G_mois_cond  += cfg.hm_int * cfg.area
+            G_mois_drive += cfg.hm_int * cfg.area * Pv_surf
+            Glat_cond_w  += cfg.hm_int * cfg.area
+            Glat_drive_w += cfg.hm_int * cfg.area * Pv_surf
+            # Sensible flux wall→room [W]:  positive = heat into room
+            _q_sens_walls.append(cfg.h_int * cfg.area * (T_surf - T_room_K))
 
         # ── 2-3. Windows + thermal bridges (exchange with OUTDOOR air) ─────────
         G_windows = sum(w.U_value * w.area for w in self.window_configs)   # [W/K]
@@ -202,6 +218,9 @@ class RoomSimulation:
             Q_internal += self.equipment.heat_at(self.step_count)
         if self.lighting is not None:
             Q_internal += self.lighting.heat_at(self.step_count)
+        for vs in self.vapor_sources:
+            G_internal  += vs.moisture_at(self.step_count)
+            Q_internal  += vs.latent_heat_at(self.step_count)
 
         # ── 6. Ventilation + infiltration (exchange with OUTDOOR air) ──────────
         n_ach = 0.0
@@ -216,7 +235,10 @@ class RoomSimulation:
         hrv_mois = getattr(self.ventilation, 'moisture_recovery', 0.0) if self.ventilation else 0.0
 
         G_vent_th = n_vol_s * rho_air * lib.CpA * (1.0 - hrv)             # [W/K]
-        G_vent    = n_vol_s * rho_air * (Pv_ext - Pv_room) / (lib.Rv * T_room_K) * (1.0 - hrv_mois)
+        # Moisture ventilation — split into cond+drive for implicit solve
+        _vent_mois_cond  = n_vol_s * rho_air / (lib.Rv * T_room_K) * (1.0 - hrv_mois)
+        G_mois_cond  += _vent_mois_cond
+        G_mois_drive += _vent_mois_cond * Pv_ext
 
         # ── 7. Implicit room-air energy balance ────────────────────────────────
         # Backward-Euler step of   C_eff·dT/dt = Σ G_i·(T_i − T_room) + Q_indep:
@@ -233,7 +255,16 @@ class RoomSimulation:
         G_env   = G_windows + G_bridges + G_vent_th        # conductance to outdoor air
         G_tot   = G_walls_th + G_env                       # [W/K] total air conductance
         Q_indep = Q_solar + Q_internal                     # [W] T-independent gains
-        Q_drive = Qdrive_walls + G_env * T_ext_K + Q_indep # [W]  (temperatures in K)
+
+        # Latent heat exchange wall ↔ room air [W]:
+        #   Q_lat = Lv × g_net   where g_net = Σ hm_int·A·(Pv_surf − Pv_room)
+        #   Positive → wall releases moisture → latent heat added to room (warms)
+        #   Negative → wall absorbs moisture → latent heat removed from room (cools)
+        # Pv_room is the current (old) value; explicit treatment is stable here
+        # because Lv·Glat_cond_w·Pv_room / C_eff << 1 for typical conditions.
+        Q_lat_walls = lib.Lv * (Glat_drive_w - Glat_cond_w * Pv_room)  # [W]
+
+        Q_drive = Qdrive_walls + G_env * T_ext_K + Q_indep + Q_lat_walls
         D       = a + G_tot
 
         T_old_K  = T_room_K
@@ -269,11 +300,17 @@ class RoomSimulation:
         T_new_K     = (a * T_old_K + Q_drive + Q_HVAC) / D
         self.T_room = float(np.clip(T_new_K - 273.15, -10.0, 50.0))
 
-        # ── 10. Update room humidity ───────────────────────────────────────────
-        G_total = G_walls + G_vent + G_internal
-        dPv     = G_total * lib.Rv * T_room_K * dt / self.volume
-        Pv_new  = max(Pv_room + dPv, 0.0)
-        Psat_new= lib.Psat(self.T_room + 273.15, self.RH_room)
+        # ── 10. Room moisture — implicit backward-Euler step ──────────────────
+        # Pv_room-dependent terms are collected as G_mois_cond [kg/(s·Pa)] and
+        # G_mois_drive [kg/s].  Occupant vapour is a pure source (no Pv_room dep).
+        # Capacitance equation:  C/dt·(Pv_new − Pv_old) = G_drive − G_cond·Pv_new
+        # → Pv_new = (C/dt·Pv_old + G_drive) / (C/dt + G_cond)   — stable for any dt.
+        G_mois_drive += G_internal   # [kg/s] occupant moisture (source term)
+        C_mois  = self.volume / (lib.Rv * T_room_K)   # [kg/Pa] moisture capacitance
+        a_mois  = C_mois / dt
+        Pv_new  = (a_mois * Pv_room + G_mois_drive) / (a_mois + G_mois_cond)
+        Pv_new  = max(Pv_new, 0.0)
+        Psat_new = lib.Psat(self.T_room + 273.15, self.RH_room)
         self.RH_room = float(np.clip(Pv_new / Psat_new, 0.05, 1.0))
 
         # ── 11. Step walls with updated room state as interior BC ──────────────
@@ -292,6 +329,9 @@ class RoomSimulation:
         self.StockQ_HVAC.append(Q_HVAC)
         for cfg, wall_obj in zip(self.wall_configs, self.walls):
             self.StockT_walls[cfg.name].append(float(wall_obj.T[-1, 0]) - 273.15)
+        for cfg, qsw in zip(self.wall_configs, _q_sens_walls):
+            self.StockQ_sens_walls[cfg.name].append(qsw)
+        self.StockQ_lat_total.append(Q_lat_walls)
 
         self.t_sim += dt
         self.step_count += 1
