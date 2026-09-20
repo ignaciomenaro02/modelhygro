@@ -112,7 +112,7 @@ class Hempcrete:
 
 class Rock_Wool:
     """
-    Laine de roche (rock / mineral wool).
+    Rock / mineral wool.
     Mineral fiber — essentially non-hygroscopic, very vapour-permeable.
     Source: ISO 10456, HAMSTAD benchmark material 1.
     """
@@ -136,7 +136,7 @@ class Rock_Wool:
 
 class Wood_Fiber:
     """
-    Laine / panneau de fibres de bois (wood fibre insulation board).
+    Wood fibre insulation board.
     Hygroscopic insulation — good moisture buffering.
     Source: Kaemmerlen (2010), IEA Annex 55.
     """
@@ -164,7 +164,7 @@ class Wood_Fiber:
 
 class Concrete:
     """
-    Béton normal (normal-weight concrete).
+    Normal-weight concrete.
     Source: EN ISO 10456, Künzel (1995).
     """
     def rho(T, RH):   return 2300
@@ -191,7 +191,7 @@ class Concrete:
 
 class Wood:
     """
-    Bois résineux (softwood — spruce/pine, across-grain direction).
+    Softwood (spruce/pine), across-grain direction.
     Source: EN 13986, Siau (1984).
     """
     def rho(T, RH):   return 500
@@ -214,7 +214,7 @@ class Wood:
 
 class Vapor_Barrier:
     """
-    Pare-vapeur polyéthylène (PE film, 0.2 mm thick).
+    Polyethylene vapour barrier (PE film, 0.2 mm thick).
     Very high vapour resistance (Sd ≈ 100 m).
     Use a thin layer (e.g. 2 mm) in the wall stack.
     Source: manufacturer data.
@@ -237,7 +237,7 @@ class Vapor_Barrier:
 
 class Earth_Plaster:
     """
-    Enduit de terre (earth / clay plaster).
+    Earth / clay plaster.
     Highly hygroscopic finish coat, excellent moisture buffer.
     Source: Fabbri & Morel (2014), Chabriac (2014).
     """
@@ -265,7 +265,7 @@ class Earth_Plaster:
 
 class Gypsum_Plaster:
     """
-    Enduit de plâtre (gypsum plaster / enduit plâtre).
+    Gypsum plaster.
     Source: Künzel (1995), ISO 10456.
     """
     def rho(T, RH):   return 1200
@@ -292,7 +292,7 @@ class Gypsum_Plaster:
 
 class Lime_Plaster:
     """
-    Enduit de chaux (lime plaster — aérien).
+    Air-hardening lime plaster.
     Source: Lawrence et al. (2009).
     """
     def rho(T, RH):   return 1600
@@ -319,7 +319,7 @@ class Lime_Plaster:
 
 class Fermacell:
     """
-    Panneau Fermacell (gypsum-fibre board).
+    Fermacell gypsum-fibre board.
     Good moisture-buffering, used as interior finish or sheathing.
     Source: Fermacell technical datasheet (2023).
     """
@@ -347,7 +347,7 @@ class Fermacell:
 
 class BA13:
     """
-    Plaque de plâtre BA13 (standard gypsum plasterboard).
+    BA13 standard gypsum plasterboard (13 mm).
     Source: Placo / Saint-Gobain technical datasheet.
     """
     def rho(T, RH):   return 840

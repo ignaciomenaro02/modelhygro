@@ -6,7 +6,7 @@ RE2020 energy performance indicators for French residential buildings.
 
 Computes
 --------
-BBio    Bioclimatic needs indicator  [sans unité, points]
+BBio    Bioclimatic needs indicator  [dimensionless, points]
         Measures the building's intrinsic efficiency in limiting heating,
         cooling and lighting needs. Lower is better.
 
@@ -19,7 +19,7 @@ Cep,nr  Non-renewable primary energy [kWh_ep/(m²·an)]
 DH      Summer comfort indicator     [°C·h]
         Degree-hours of discomfort above 28°C. < 1250 for RE2020 compliance.
 
-RE2020 thresholds (mainland France, individual house — arrêté 4 août 2021)
+RE2020 thresholds (mainland France, individual house — order of 4 August 2021)
 ---------------------------------------------------------------------------
 BBio_max    : 63 points  (climate zone H1a — adjusted per zone)
 Cep_max     : 90 kWh_ep/(m²·an)  (all uses)
@@ -71,7 +71,7 @@ _CEPNR_MAX = 70    # non-renewable
 # Summer comfort threshold [°C·h] above 28°C
 _DH_MAX = 1250
 
-# Primary energy conversion factors (RE2020 / décret 2021)
+# Primary energy conversion factors (RE2020 / 2021 decree)
 _F_EP = {
     'electricity': 2.3,    # [kWh_ep / kWh_final]
     'gas':         1.0,
@@ -79,7 +79,7 @@ _F_EP = {
     'district':    0.6,
 }
 
-# RE2020 BBio coefficients (αchauff, αrefr, αéclairage)
+# RE2020 BBio coefficients (alpha_heating, alpha_cooling, alpha_lighting)
 _ALPHA_HEAT  = 1.0
 _ALPHA_COOL  = 1.0
 _ALPHA_LIGHT = 1.0

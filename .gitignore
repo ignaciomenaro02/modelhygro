@@ -1,4 +1,3 @@
-Plaintext
 __pycache__/
 *.pyc
 .venv/
@@ -6,5 +5,5 @@ __pycache__/
 .vscode/
 *.pdf
 
-# Datos meteo RE2020: licencia = uso reglamentario, prohibido redistribuir
+# RE2020 weather data: licence allows regulatory use only, no redistribution
 scenarios_meteorologiques_*.xlsx

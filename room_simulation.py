@@ -29,7 +29,7 @@ well-mixed single zone:
 
 Usage
 -----
-  See simulation_chanvre.py for a complete example.
+  See simulation.py for a complete example.
 """
 
 import sys

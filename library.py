@@ -47,7 +47,7 @@ sigma = 5.67e-8     # Stefan-Boltzmann constant [W/(m2.K4)]
 def Tsky(T,cf):
     """
     Sky temperature
-    From Janssen et al. (2017). Int Journ of Heat and Mass Transfer, vol.50
+    From Janssen, Blocken & Carmeliet (2007). Int. J. Heat Mass Transfer, 50(5-6), 1128-1140
     """
     return T - (23.8 - 0.2025*(T-273.15))*(1-0.87*cf)
 

@@ -114,7 +114,7 @@ def load_weather_csv(path: str, sep: str = ';') -> Weather:
 
 
 RE2020_ZONES = ('H1a', 'H1b', 'H1c', 'H2a', 'H2b', 'H2c', 'H2d', 'H3')
-RE2020_MODES = ('Th-BC', 'Th-D')   # Th-BC: besoins/consommations | Th-D: confort d'été
+RE2020_MODES = ('Th-BC', 'Th-D')   # Th-BC: energy needs / consumption | Th-D: summer comfort
 
 
 def load_re2020_weather(path: str, zone: str = 'H1c', mode: str = 'Th-D') -> Weather:
