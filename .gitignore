@@ -1,0 +1,10 @@
+Plaintext
+__pycache__/
+*.pyc
+.venv/
+.env
+.vscode/
+*.pdf
+
+# Datos meteo RE2020: licencia = uso reglamentario, prohibido redistribuir
+scenarios_meteorologiques_*.xlsx
