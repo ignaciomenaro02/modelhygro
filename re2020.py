@@ -6,7 +6,7 @@ RE2020 energy performance indicators for French residential buildings.
 
 Computes
 --------
-BBio    Bioclimatic needs indicator  [dimensionless, points]
+BBio    Bioclimatic needs indicator  [sans unité, points]
         Measures the building's intrinsic efficiency in limiting heating,
         cooling and lighting needs. Lower is better.
 
@@ -17,9 +17,13 @@ Cep,nr  Non-renewable primary energy [kWh_ep/(m²·an)]
         Same but excluding renewable sources (on-site PV, etc.).
 
 DH      Summer comfort indicator     [°C·h]
-        Degree-hours of discomfort above 28°C. < 1250 for RE2020 compliance.
+        Official definition (Th-D mode): sum over the occupied hours of the excess of the
+        operative temperature over the adaptive-comfort limit
+        max(26, 0.33·T_rm + 18.8 + 2) for dwellings (add_adaptive_discomfort_hours).
+        A simplified fixed-28 °C version is also kept (add_discomfort_hours).
+        < 1250 for RE2020 compliance.
 
-RE2020 thresholds (mainland France, individual house — order of 4 August 2021)
+RE2020 thresholds (mainland France, individual house — arrêté 4 août 2021)
 ---------------------------------------------------------------------------
 BBio_max    : 63 points  (climate zone H1a — adjusted per zone)
 Cep_max     : 90 kWh_ep/(m²·an)  (all uses)
@@ -57,7 +61,7 @@ import numpy as np
 
 # ── RE2020 reference values ───────────────────────────────────────────────────
 
-# BBio_max by climate zone (indicative — see official tables for exact values)
+# BBio_max by climate zone
 _BBIO_MAX = {
     'H1a': 63, 'H1b': 63, 'H1c': 63,
     'H2a': 60, 'H2b': 54, 'H2c': 50, 'H2d': 47,
@@ -71,7 +75,7 @@ _CEPNR_MAX = 70    # non-renewable
 # Summer comfort threshold [°C·h] above 28°C
 _DH_MAX = 1250
 
-# Primary energy conversion factors (RE2020 / 2021 decree)
+# Primary energy conversion factors (RE2020 / décret 2021)
 _F_EP = {
     'electricity': 2.3,    # [kWh_ep / kWh_final]
     'gas':         1.0,
@@ -79,10 +83,31 @@ _F_EP = {
     'district':    0.6,
 }
 
-# RE2020 BBio coefficients (alpha_heating, alpha_cooling, alpha_lighting)
-_ALPHA_HEAT  = 1.0
-_ALPHA_COOL  = 1.0
-_ALPHA_LIGHT = 1.0
+# RE2020 BBio coefficients (αchauff, αrefr, αéclairage)
+# Th-BCE 2020, Annex III, section 13.1.3:  Bbio = 2·B_ch + 2·B_fr + 5·B_ecl
+# (needs in kWh/(m²·yr) of habitable area)
+_ALPHA_HEAT  = 2.0
+_ALPHA_COOL  = 2.0
+_ALPHA_LIGHT = 5.0
+
+# Summer comfort (Th-D): adaptive-comfort upper limit in ambience category 1 (dwellings)
+#   T_max = max(T_cooling_setpoint, 0.33·T_rm + 18.8 + delta),  delta = 2 / 3 / 4 K for category 1 / 2 / 3
+# Th-BCE 2020, Annex III, "Indicateurs de confort" and Tableau 10 (dwellings: category 1)
+_DELTA_CATEGORY = {1: 2.0, 2: 3.0, 3: 4.0}
+
+
+def adaptive_discomfort(T_op, T_rm, occupied, T_cool_set: float = 26.0, category: int = 1):
+    """
+    Hourly summer discomfort [K] with the RE2020 adaptive-comfort definition:
+    excess of the operative temperature over
+        T_max = max(T_cool_set, 0.33·T_rm + 18.8 + delta(category)),
+    counted only in occupied hours (0 otherwise).
+    """
+    T_op  = np.asarray(T_op,  dtype=float)
+    T_rm  = np.asarray(T_rm,  dtype=float)
+    occ   = np.asarray(occupied, dtype=float)
+    T_max = np.maximum(T_cool_set, 0.33 * T_rm + 18.8 + _DELTA_CATEGORY[category])
+    return np.maximum(T_op - T_max, 0.0) * occ
 
 
 class RE2020Evaluator:
@@ -131,7 +156,8 @@ class RE2020Evaluator:
         self._carrier_dhw   = 'electricity'
 
         # Discomfort degree-hours [°C·h]
-        self._DH            = 0.0
+        self._DH            = 0.0     # simplified: hours above a fixed 28 °C (fed step by step)
+        self._DH_adapt      = None    # official: adaptive comfort, occupied hours (None = not computed)
 
         # Renewable production on site [kWh_ep]
         self._E_pv_ep       = 0.0
@@ -195,6 +221,27 @@ class RE2020Evaluator:
         excess = np.maximum(T_arr - 28.0, 0.0)
         self._DH += float(excess.sum()) * (dt / 3600.0)   # [°C·h]
 
+    def add_adaptive_discomfort_hours(self, T_op, T_rm, occupied,
+                                      T_cool_set: float = 26.0, category: int = 1,
+                                      dt: int = 3600):
+        """
+        Official RE2020 summer-comfort indicator (DH), adaptive-comfort definition.
+
+        Sum, over the OCCUPIED hours, of how far the operative temperature exceeds
+        T_max = max(T_cool_set, 0.33·T_rm + 18.8 + delta(category)).
+
+        Parameters
+        ----------
+        T_op      : array   Operative temperature [°C] (here: room air temperature).
+        T_rm      : array   Running-mean outdoor temperature [°C], one value per step.
+        occupied  : array   Occupancy indicator (bool / 0-1), one value per step.
+        T_cool_set: float   Cooling setpoint in occupation [°C] (26 °C for dwellings).
+        category  : int     Ambience category 1, 2 or 3 (dwellings: 1).
+        dt        : int     Time step [s].
+        """
+        excess = adaptive_discomfort(T_op, T_rm, occupied, T_cool_set, category)
+        self._DH_adapt = (self._DH_adapt or 0.0) + float(excess.sum()) * (dt / 3600.0)
+
     # ── Indicator calculation ──────────────────────────────────────────────────
 
     def _to_primary(self, kWh_final: float, carrier: str) -> float:
@@ -230,7 +277,7 @@ class RE2020Evaluator:
         B_cool  = (self._B_cool_kWh or self._E_cool_kWh) / self.A
         B_light = self._E_light_kWh / self.A
 
-        # 3. Weighted sum (the alpha weights are 1.0 in this simplified model).
+        # 3. Weighted sum with the alpha weights of the method (2, 2, 5).
         BBio = (_ALPHA_HEAT  * B_heat
                 + _ALPHA_COOL  * B_cool
                 + _ALPHA_LIGHT * B_light)
@@ -282,9 +329,12 @@ class RE2020Evaluator:
             'climate_zone'   : self.zone,
             **bbio,
             **cep,
-            'DH_discomfort'  : round(self._DH, 0),
+            # Official (adaptive comfort) DH when available, else the simplified 28 °C one
+            'DH_discomfort'  : round(self._DH if self._DH_adapt is None else self._DH_adapt, 0),
+            'DH_adaptive'    : None if self._DH_adapt is None else round(self._DH_adapt, 0),
+            'DH_28C'         : round(self._DH, 0),
             'DH_max'         : _DH_MAX,
-            'compliant_DH'   : self._DH <= _DH_MAX,
+            'compliant_DH'   : (self._DH if self._DH_adapt is None else self._DH_adapt) <= _DH_MAX,
             'E_heat_kWh_m2'  : round(self._E_heat_kWh  / self.A, 1),
             'E_cool_kWh_m2'  : round(self._E_cool_kWh  / self.A, 1),
             'E_total_kWh_m2' : round((self._E_heat_kWh + self._E_cool_kWh +

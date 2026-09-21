@@ -107,13 +107,13 @@ class Hempcrete:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# New materials
+# Others materials
 # ══════════════════════════════════════════════════════════════════════════════
 
 class Rock_Wool:
     """
     Rock / mineral wool.
-    Mineral fiber — essentially non-hygroscopic, very vapour-permeable.
+    Mineral fiber, essentially non-hygroscopic, very vapour-permeable.
     Source: ISO 10456, HAMSTAD benchmark material 1.
     """
     def rho(T, RH):   return 100          # [kg/m³]

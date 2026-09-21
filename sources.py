@@ -180,11 +180,13 @@ class HVACConfig:
     f_ep           : float   Primary energy conversion factor.
                              RE2020: electricity = 2.3, gas = 1.0.
 
-    Schedules
-    ---------
-    heating_schedule / cooling_schedule: list of 0/1 per step.
-        Allows setback temperatures (e.g. 16°C at night) by multiplying
-        the setpoint. None = system always available.
+    heating_control: object  Optional heating controller (see heating.RE2020Heating).
+                             It must provide
+                               heating_setpoint(step) -> setpoint [°C] or None (heating off)
+                               record(step, T_free_C, Q_heat_W, dt)
+                             When given, it replaces the constant T_heat_set (which is
+                             then only used as a fallback). None = thermostat always
+                             available at T_heat_set.
     """
     T_heat_set      : float  = 20.0
     T_cool_set      : float  = 26.0
@@ -194,6 +196,7 @@ class HVACConfig:
     max_power_cool  : float  = 5000.0  # [W]
     energy_carrier  : str    = 'electricity'
     f_ep            : float  = 2.3     # RE2020 primary energy factor
+    heating_control : Optional[object] = None
 
 
 # ══════════════════════════════════════════════════════════════════════════════

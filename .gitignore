@@ -7,3 +7,6 @@ __pycache__/
 
 # RE2020 weather data: licence allows regulatory use only, no redistribution
 scenarios_meteorologiques_*.xlsx
+
+# Simulation outputs: one folder per run (PDFs, run_config.txt, summary.json, comparison.csv)
+results/

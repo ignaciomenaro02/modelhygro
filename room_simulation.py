@@ -85,6 +85,7 @@ class RoomSimulation:
         RH_room_init    = 0.50,
         re2020          = None,
         vapor_sources   = None,   # list of VaporSourceConfig
+        latent_to_air   = True,
     ):
         self.wall_configs   = wall_configs
         self.window_configs = window_configs  or []
@@ -102,6 +103,12 @@ class RoomSimulation:
         self.internal_mass  = float(internal_mass)
         self.re2020_ev      = re2020
         self.vapor_sources  = vapor_sources or []
+        # True : the latent heat of the moisture exchanged with the walls (Lv × vapour flow) is
+        #        also added to the room-air heat balance (total-enthalpy treatment).
+        # False: the walls only exchange sensible heat with the air; the latent energy stays in
+        #        the wall surface balance (evaporation cools the wall, which then draws heat from
+        #        the air) and in the vapour, not in the air temperature.
+        self.latent_to_air  = bool(latent_to_air)
 
         # Room state
         self.T_room  = float(T_room_init)    # [°C]
@@ -153,6 +160,28 @@ class RoomSimulation:
         # Energy accumulators [kWh]
         self.E_heat_kWh = 0.0
         self.E_cool_kWh = 0.0
+
+    # ── Spin-up ───────────────────────────────────────────────────────────────
+
+    def load_state(self, other):
+        """
+        Start from the final state of another simulation (spin-up / warm-up run).
+
+        Copies the room air state and, node by node, the temperature and moisture fields of
+        every wall; the two simulations must have the same walls and mesh. All the result
+        histories restart from this state, so a spin-up run leaves no trace in the results.
+        """
+        self.T_room, self.RH_room = other.T_room, other.RH_room
+        for wall, ref in zip(self.walls, other.walls):
+            wall.T, wall.RH, wall.Pc, wall.U = (a.copy() for a in (ref.T, ref.RH, ref.Pc, ref.U))
+            wall.StockT  = [wall.T.copy()]
+            wall.StockRH = [wall.RH.copy()]
+            wall.StockPc = [wall.Pc.copy()]
+            wall.Stockw  = [wall.layer.w(wall.T, wall.RH)]
+        self.StockT_room  = [self.T_room]
+        self.StockRH_room = [self.RH_room]
+        for name, wall in zip(list(self.StockT_walls), self.walls):
+            self.StockT_walls[name] = [float(wall.T[-1, 0]) - 273.15]
 
     # ── Single time step ───────────────────────────────────────────────────────    
 
@@ -268,7 +297,8 @@ class RoomSimulation:
         # because Lv·Glat_cond_w·Pv_room / C_eff << 1 for typical conditions.
         Q_lat_walls = lib.Lv * (Glat_drive_w - Glat_cond_w * Pv_room)  # [W]
 
-        Q_drive = Qdrive_walls + G_env * T_ext_K + Q_indep + Q_lat_walls
+        Q_drive = (Qdrive_walls + G_env * T_ext_K + Q_indep
+                   + (Q_lat_walls if self.latent_to_air else 0.0))
         D       = a + G_tot
 
         T_old_K  = T_room_K
@@ -279,10 +309,15 @@ class RoomSimulation:
         # exactly the power needed to land ON the setpoint (capped at max power).
         Q_HVAC = 0.0
         if self.hvac is not None:
-            T_heat_K = self.hvac.T_heat_set + 273.15
-            T_cool_K = self.hvac.T_cool_set + 273.15
+            # An optional heating controller (e.g. the RE2020 scenario in heating.py) can
+            # change the setpoint over time or forbid heating (None) outside its season.
+            ctrl       = getattr(self.hvac, 'heating_control', None)
+            T_heat_set = (self.hvac.T_heat_set if ctrl is None
+                          else ctrl.heating_setpoint(self.step_count))
+            T_heat_K   = None if T_heat_set is None else T_heat_set + 273.15
+            T_cool_K   = self.hvac.T_cool_set + 273.15
 
-            if T_free_K < T_heat_K:
+            if T_heat_K is not None and T_free_K < T_heat_K:
                 Q_HVAC = float(np.clip(T_heat_K * D - (a * T_old_K + Q_drive),
                                        0.0, self.hvac.max_power_heat))
                 dE_heat = Q_HVAC / self.hvac.efficiency_heat * dt / 3.6e6
@@ -299,6 +334,9 @@ class RoomSimulation:
                 if self.re2020_ev is not None:
                     self.re2020_ev.add_cooling_kWh(dE_cool, self.hvac.energy_carrier)  # final
                     self.re2020_ev.add_cooling_need_kWh(abs(Q_HVAC) * dt / 3.6e6)      # need (BBio)
+
+            if ctrl is not None:
+                ctrl.record(self.step_count, T_free_K - 273.15, max(Q_HVAC, 0.0), dt)
 
         # ── 9. New room temperature (implicit solution) ────────────────────────
         T_new_K     = (a * T_old_K + Q_drive + Q_HVAC) / D
