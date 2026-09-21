@@ -33,7 +33,7 @@ COLUMNS = ["scenario", "zone", "mode", "start", "end", "walls", "ach_overvent", 
            "T_max_out", "T_max_room", "T_min_room", "DH_RE2020", "DH_28C",
            "comfort_ok_pct", "comfort_hot_pct", "comfort_cold_pct",
            "heating_need_kWh_m2", "RH_mean", "RH_daily_amplitude", "pct_RH_above_70",
-           "pct_RH_below_30", "latent_release_kWh", "latent_absorb_kWh", "latent_to_air",
+           "pct_RH_below_30", "latent_release_kWh", "latent_absorb_kWh",
            "spinup_days", "folder"]
 
 

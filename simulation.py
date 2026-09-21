@@ -163,11 +163,6 @@ HYGRO_EFFECT  = True       # False = walls impermeable to vapour (heat only)
 # Typical Sd: paint 0.05–0.5 m, PE film ≈ 100 m (Bui used 0.5 m for a conventional coating).
 WALL_INTERIOR_SD = {}      # e.g. {"North": 100.0, "East": 100.0}
 
-# Latent heat of the moisture exchanged between walls and room air:
-# True  = also added to the room-air heat balance (as in the original model)
-# False = walls exchange only sensible heat with the air (evaporation cools the wall surface)
-# This choice changes how hygroscopic walls affect the room temperature: see the study notes.
-LATENT_TO_AIR = True
 H_EXT, H_INT  = 25.0, 8.0  # convective coefficients [W/(m²·K)]
 MESH_SIZE     = 0.01       # mesh size inside the wall [m]
 DT            = 3600.0     # time step [s] — schedules and weather are hourly: do not change
@@ -191,7 +186,6 @@ _ap.add_argument("--start"); _ap.add_argument("--end")
 _ap.add_argument("--heating", choices=["on", "off"])
 _ap.add_argument("--re2020",  choices=["on", "off"])
 _ap.add_argument("--scenario", help="named variant defined in scenarios.py")
-_ap.add_argument("--latent", choices=["on", "off"], help="LATENT_TO_AIR (see section 1)")
 _ap.add_argument("--spinup", type=int, help="SPINUP_DAYS (see section 1); 0 = no spin-up")
 _args, _ = _ap.parse_known_args()
 
@@ -222,7 +216,6 @@ START_DATE = _args.start or START_DATE
 END_DATE   = _args.end   or END_DATE
 HEATING    = HEATING if _args.heating is None else (_args.heating == "on")
 RE2020     = RE2020  if _args.re2020  is None else (_args.re2020  == "on")
-LATENT_TO_AIR = LATENT_TO_AIR if _args.latent is None else (_args.latent == "on")
 SPINUP_DAYS   = SPINUP_DAYS if _args.spinup is None else _args.spinup
 ZONE = "MACON" if ZONE.upper() == "MACON" else ZONE[:2].upper() + ZONE[2:].lower()   # h1C → H1c
 
@@ -413,7 +406,6 @@ def build_simulation(start_doy, n_steps, T_room0, RH_room0, evaluate=True, quiet
         T_room_init   = T_room0,
         RH_room_init  = RH_room0,
         re2020        = ev,
-        latent_to_air = LATENT_TO_AIR,
     )
     return sim, ctrl, ev
 
@@ -1094,7 +1086,7 @@ summary = {
     "RH_daily_amplitude": RH_amp, "pct_RH_above_70": pct_RH_hi, "pct_RH_below_30": pct_RH_lo,
     "latent_release_kWh": LAT_REL_KWH, "latent_absorb_kWh": LAT_ABS_KWH,
     "interior_Sd": dict(WALL_INTERIOR_SD), "hygro_effect": HYGRO_EFFECT,
-    "latent_to_air": LATENT_TO_AIR, "spinup_days": SPINUP_DAYS,
+    "spinup_days": SPINUP_DAYS,
 }
 # hourly series (for comparing runs or plotting elsewhere)
 np.savetxt(os.path.join(OUT_DIR, "series.csv"),

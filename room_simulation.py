@@ -85,7 +85,6 @@ class RoomSimulation:
         RH_room_init    = 0.50,
         re2020          = None,
         vapor_sources   = None,   # list of VaporSourceConfig
-        latent_to_air   = True,
     ):
         self.wall_configs   = wall_configs
         self.window_configs = window_configs  or []
@@ -103,12 +102,6 @@ class RoomSimulation:
         self.internal_mass  = float(internal_mass)
         self.re2020_ev      = re2020
         self.vapor_sources  = vapor_sources or []
-        # True : the latent heat of the moisture exchanged with the walls (Lv × vapour flow) is
-        #        also added to the room-air heat balance (total-enthalpy treatment).
-        # False: the walls only exchange sensible heat with the air; the latent energy stays in
-        #        the wall surface balance (evaporation cools the wall, which then draws heat from
-        #        the air) and in the vapour, not in the air temperature.
-        self.latent_to_air  = bool(latent_to_air)
 
         # Room state
         self.T_room  = float(T_room_init)    # [°C]
@@ -289,16 +282,15 @@ class RoomSimulation:
         G_tot   = G_walls_th + G_env                       # [W/K] total air conductance
         Q_indep = Q_solar + Q_internal + Q_extra_W         # [W] T-independent gains
 
-        # Latent heat exchange wall ↔ room air [W]:
-        #   Q_lat = Lv × g_net   where g_net = Σ hm_int·A·(Pv_surf − Pv_room)
-        #   Positive → wall releases moisture → latent heat added to room (warms)
-        #   Negative → wall absorbs moisture → latent heat removed from room (cools)
-        # Pv_room is the current (old) value; explicit treatment is stable here
-        # because Lv·Glat_cond_w·Pv_room / C_eff << 1 for typical conditions.
+        # Latent heat of the moisture exchanged wall ↔ room air [W], reported only:
+        #   Q_lat = Lv × Σ hm_int·A·(Pv_surf − Pv_room)     (+ = the walls release moisture)
+        # It is NOT added to the room-air heat balance: the vapour keeps its latent heat as
+        # humidity, it does not condense in the air. The evaporation heat is drawn from the wall
+        # surface (wall boundary condition), which then takes sensible heat from the air.
+        # Adding it to the air would count the same energy twice.
         Q_lat_walls = lib.Lv * (Glat_drive_w - Glat_cond_w * Pv_room)  # [W]
 
-        Q_drive = (Qdrive_walls + G_env * T_ext_K + Q_indep
-                   + (Q_lat_walls if self.latent_to_air else 0.0))
+        Q_drive = Qdrive_walls + G_env * T_ext_K + Q_indep
         D       = a + G_tot
 
         T_old_K  = T_room_K
