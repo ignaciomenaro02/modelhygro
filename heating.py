@@ -30,6 +30,9 @@ What is implemented
                     then stays on until the end of the year
    The tests run every day at 09:00 on the previous 24 hours.
    In Th-D mode heating is never allowed during the adaptive-comfort period.
+3. Optional fixed calendar (season_window): the season is a given window of days of the
+   year instead of the algorithm above. Used to compare designs at the same heating service,
+   because the RE2020 algorithm opens the season at different dates for different walls.
 
 Simplifications
 ---------------
@@ -95,9 +98,15 @@ class RE2020Heating:
                        Indexed by day of the year - 1; True inside the adaptive-comfort
                        period. Pass it only in Th-D mode (heating is then never allowed
                        during that period).
+    season_window    : (first_day, last_day), optional
+                       Fixed heating calendar, days of the year, both included; the window
+                       wraps over the new year when first_day > last_day, e.g. (274, 120) =
+                       1 October to 30 April. None = RE2020 season algorithm.
     """
 
-    def __init__(self, start_doy, floor_area, setpoint=19.0, setback=16.0, adaptive_comfort=None):
+    def __init__(self, start_doy, floor_area, setpoint=19.0, setback=16.0, adaptive_comfort=None,
+                 season_window=None):
+        self.season_window = None if season_window is None else tuple(int(d) for d in season_window)
         self.start_doy = int(start_doy)
         self.area      = float(floor_area)
         self.setpoint  = float(setpoint)
@@ -150,7 +159,10 @@ class RE2020Heating:
     def heating_setpoint(self, step):
         """Setpoint [°C] for this step, or None when heating is not authorized."""
         doy, hour, weekday, day = self._clock(step)
-        if hour == 9:
+        if self.season_window is not None:
+            first, last = self.season_window
+            self.on = (first <= doy <= last) if first <= last else (doy >= first or doy <= last)
+        elif hour == 9:
             self._daily_update(doy)
         blocked = self.adaptive is not None and bool(self.adaptive[doy - 1])
         authorized = self.on and not blocked

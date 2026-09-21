@@ -10,6 +10,8 @@ Run several named scenarios (see scenarios.py) and compare them.
     python run_scenarios.py --all --parallel 3    # up to 3 at the same time
     python run_scenarios.py hemp rammed_earth -- --zone H3 --start 01/01 --end 01/01
                                                   # flags after "--" go to every simulation
+    python run_scenarios.py --all --out my_folder # batch folder inside my_folder instead of results/
+    python run_scenarios.py hemp_open+ach_high    # "+" combines scenarios (applied left to right)
 
 Everything is saved in  results/batch_<date>_<time>/ :
 one folder per scenario (with its own PDFs, run_config.txt, summary.json) plus
@@ -114,17 +116,19 @@ def main():
     ap.add_argument("names", nargs="*", help="scenario names")
     ap.add_argument("--all", action="store_true", help="run every scenario")
     ap.add_argument("--parallel", type=int, default=1, help="simulations at the same time")
+    ap.add_argument("--out", help="folder that will contain the batch folder (default: results/)")
     args = ap.parse_args(argv)
 
     if not args.names and not args.all:
         list_scenarios()
         return
     names = list(SCENARIOS) if args.all else args.names
-    unknown = [n for n in names if n not in SCENARIOS]
+    unknown = [p for n in names for p in n.split("+") if p not in SCENARIOS]
     if unknown:
         raise SystemExit(f"Unknown scenario(s): {unknown}. Run without arguments to list them.")
 
-    batch_dir = os.path.join(DIR, "results", "batch_" + datetime.now().strftime("%Y%m%d_%H%M%S"))
+    root      = os.path.abspath(args.out) if args.out else os.path.join(DIR, "results")
+    batch_dir = os.path.join(root, "batch_" + datetime.now().strftime("%Y%m%d_%H%M%S"))
     os.makedirs(batch_dir)
     print(f"Batch folder: {os.path.relpath(batch_dir, DIR)}   ({len(names)} scenarios, "
           f"{args.parallel} at a time)")

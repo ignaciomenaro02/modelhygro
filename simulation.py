@@ -143,6 +143,11 @@ HEATING_SETPOINT   = 19.0      # [°C] occupied
 HEATING_SETBACK    = 16.0      # [°C] reduced
 HEATING_EFFICIENCY = 1.0       # COP / efficiency (1.0 = ideal electric heater)
 HEATING_MAX_W      = 3000.0    # [W] maximum heating power
+# Heating season: "RE2020" = the regulatory algorithm (heating.py). It opens and closes the
+# season at different dates for different walls, so energies are not comparable at equal service.
+# A window (first_day, last_day) of the year fixes the same calendar for every run, e.g.
+# (274, 120) = 1 October to 30 April: walls are then compared at equal heating service.
+HEATING_SEASON     = "RE2020"
 
 # ── RE2020 indicators (see re2020.py) ─────────────────────────────────────────
 # RE2020 = True connects the RE2020 evaluator and reports, in the summary and in
@@ -190,25 +195,29 @@ _ap.add_argument("--spinup", type=int, help="SPINUP_DAYS (see section 1); 0 = no
 _args, _ = _ap.parse_known_args()
 
 # Scenario: overrides of the configuration above (command-line flags below still win)
+# Several scenarios can be combined with "+", e.g. "hemp_film+typical_heated+ach_high":
+# they are applied from left to right, so the last one wins when two set the same variable.
 SCENARIO, SCENARIO_NOTE = "base", ""
 if _args.scenario:
     from scenarios import SCENARIOS
-    if _args.scenario not in SCENARIOS:
-        raise SystemExit(f"Unknown scenario '{_args.scenario}'. Available: {', '.join(SCENARIOS)}")
-    SCENARIO = _args.scenario
-    _ov = dict(SCENARIOS[SCENARIO])
-    SCENARIO_NOTE = _ov.pop("note", "")
-    _ov = {k: v for k, v in _ov.items() if k.isupper()}          # lower-case keys are documentation
-    _bad = [k for k in _ov if k not in globals()]
-    if _bad:
-        raise SystemExit(f"Scenario '{SCENARIO}': unknown parameter(s) {_bad}. "
-                         f"Use the upper-case variable names of simulation.py section 1.")
-    if "WALL_STACK" in _ov:                                       # one stack for all four walls
-        WALL_STACK  = _ov.pop("WALL_STACK")
-        WALL_LAYERS = {n: WALL_STACK for n in WALL_LAYERS}
-    if "WALL_LAYERS" in _ov:                                      # only the listed walls change
-        WALL_LAYERS = {**WALL_LAYERS, **_ov.pop("WALL_LAYERS")}
-    globals().update(_ov)
+    SCENARIO, _notes = _args.scenario, []
+    for _name in SCENARIO.split("+"):
+        if _name not in SCENARIOS:
+            raise SystemExit(f"Unknown scenario '{_name}'. Available: {', '.join(SCENARIOS)}")
+        _ov = dict(SCENARIOS[_name])
+        _notes.append(_ov.pop("note", _name))
+        _ov = {k: v for k, v in _ov.items() if k.isupper()}      # lower-case keys are documentation
+        _bad = [k for k in _ov if k not in globals()]
+        if _bad:
+            raise SystemExit(f"Scenario '{_name}': unknown parameter(s) {_bad}. "
+                             f"Use the upper-case variable names of simulation.py section 1.")
+        if "WALL_STACK" in _ov:                                   # one stack for all four walls
+            WALL_STACK  = _ov.pop("WALL_STACK")
+            WALL_LAYERS = {n: WALL_STACK for n in WALL_LAYERS}
+        if "WALL_LAYERS" in _ov:                                  # only the listed walls change
+            WALL_LAYERS = {**WALL_LAYERS, **_ov.pop("WALL_LAYERS")}
+        globals().update(_ov)
+    SCENARIO_NOTE = " | ".join(_notes)
 
 ZONE       = _args.zone  or ZONE
 MODE       = _args.mode  or MODE
@@ -377,7 +386,8 @@ def build_simulation(start_doy, n_steps, T_room0, RH_room0, evaluate=True, quiet
     # Heating: RE2020 scenario and season (see heating.py); no heating = free-floating room
     hvac, ctrl = None, None
     if HEATING:
-        ctrl = RE2020Heating(start_doy, FLOOR_AREA, HEATING_SETPOINT, HEATING_SETBACK, adaptive)
+        ctrl = RE2020Heating(start_doy, FLOOR_AREA, HEATING_SETPOINT, HEATING_SETBACK, adaptive,
+                             season_window=None if HEATING_SEASON == "RE2020" else HEATING_SEASON)
         hvac = HVACConfig(T_heat_set=HEATING_SETPOINT, T_cool_set=99.0,        # no cooling
                           efficiency_heat=HEATING_EFFICIENCY, max_power_heat=HEATING_MAX_W,
                           heating_control=ctrl)
@@ -1087,6 +1097,7 @@ summary = {
     "latent_release_kWh": LAT_REL_KWH, "latent_absorb_kWh": LAT_ABS_KWH,
     "interior_Sd": dict(WALL_INTERIOR_SD), "hygro_effect": HYGRO_EFFECT,
     "spinup_days": SPINUP_DAYS,
+    "heating_season": HEATING_SEASON if HEATING else None,
 }
 # hourly series (for comparing runs or plotting elsewhere)
 np.savetxt(os.path.join(OUT_DIR, "series.csv"),
