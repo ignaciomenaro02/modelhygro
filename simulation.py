@@ -18,7 +18,7 @@ Usage
     python simulation.py --scenario rammed_earth      # a named variant from scenarios.py
     (several variants at once + comparison table: python run_scenarios.py --all)
 
-Results: EVERY run gets its own folder (never overwritten):
+Results: EVERY run gets its own folder:
     results/<date>_<time>_<scenario>_<zone>_<mode>_<start>-<end>/
 with the PDFs (model_3d, series_T_RH, wall_profiles, wall_fields_hottest,
 wall_fields_coldest, climate, comfort_map, degree_hours, + heating if HEATING),
@@ -62,12 +62,12 @@ from weather         import load_weather_csv, load_re2020_weather
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 1. CONFIGURATION  —  the only section you normally need to edit
+# 1. CONFIGURATION
 # ══════════════════════════════════════════════════════════════════════════════
 
 # ── Weather ───────────────────────────────────────────────────────────────────
 ZONE = "H1c"        # H1a H1b H1c H2a H2b H2c H2d H3     |  "MACON" = prospective CSV (+2 °C)
-MODE = "Th-D"       # "Th-D" = summer comfort (with heat wave) | "Th-BC" = typical year
+MODE = "Th-BC"       # "Th-D" = summer comfort (with heat wave) | "Th-BC" = typical year
                     # (the mode is ignored when ZONE = "MACON")
 
 # ── Simulated period ──────────────────────────────────────────────────────────
@@ -99,22 +99,26 @@ H  = 2.5            # ceiling height
 #   WALL_STACK = [("Hempcrete", 0.30), ("Earth_Plaster", 0.02)]      # hempcrete + earth plaster
 #   WALL_STACK = [("Wood_Fiber", 0.10), ("Rammed_Earth", 0.30)]      # exterior insulation + earth
 WALL_STACK = [("Hempcrete", 0.30)]
-#WALL_STACK1 = [("Rammed_Earth", 0.30), ("Earth_Plaster", 0.02), ("Vapor_Barrier", 0.02)]
+#WALL_STACK1 = [("Rammed_Earth", 0.30), ("Earth_Plaster", 0.02), ("Vapor_Barrier", 0.002)]
 
 # Keys: South, North, East, West. Give a wall its own list to make it different.
 WALL_LAYERS = {"South": WALL_STACK, "North": WALL_STACK, "East": WALL_STACK, "West": WALL_STACK}
 
 # ── Windows (orientation "S", "N", "E" or "W") ────────────────────────────────
 # The opaque area of each wall is computed automatically: length × height − windows.
+# Standby: no windows for now (opaque box). Uncomment to bring them back.
 WINDOWS = [
-    WindowConfig("South window", area=1.5, orientation="S", U_value=1.1, g_value=0.60, shading=0.30),
-    WindowConfig("North window", area=0.5, orientation="N", U_value=1.1, g_value=0.60, shading=0.0),
+    # WindowConfig("South window", area=1.5, orientation="S", U_value=1.1, g_value=0.60, shading=0.30),
+    # WindowConfig("North window", area=0.5, orientation="N", U_value=1.1, g_value=0.60, shading=0.0),
 ]
-THERMAL_BRIDGES = [ThermalBridge("Window frames", psi=0.04, length=6.0)]
+# Standby too: this bridge represents the window frames, meaningless without windows.
+THERMAL_BRIDGES = [
+    # ThermalBridge("Window frames", psi=0.04, length=6.0),
+]
 INFILTRATION    = [OpeningConfig("Infiltration", ach_contribution=0.1)]   # [1/h]
 
 # ── Ventilation ───────────────────────────────────────────────────────────────
-# ACH_BASE     : hygiene ventilation, all day [1/h]
+# ACH_BASE     : hygiene ventilation, all day [1/h] "Air Changes per Hour"
 # ACH_OVERVENT : air changes ADDED to ACH_BASE during night overventilation [1/h].
 #                For constant ventilation equal to ACH_BASE, set ACH_OVERVENT = 0
 ACH_BASE      = 0.50
@@ -123,7 +127,7 @@ NIGHT_HOURS   = list(range(0, 8)) + list(range(22, 24))    # 22h → 8h
 SUMMER_MONTHS = (5, 9)     # May–September: night overventilation active and comfort evaluated
 
 # ── Internal loads ────────────────────────────────────────────────────────────
-N_OCCUPANTS     = 1.0
+N_OCCUPANTS     = 2.0
 Q_SENSIBLE      = 80.0       # [W/person]
 Q_LATENT        = 60.0       # [W/person]  (water vapour)
 OCCUPANCY_HOURS = list(range(8, 22))
@@ -138,7 +142,7 @@ LIGHTING_HOURS  = list(range(20, 24))
 #     restarted in autumn when the room gets cold
 # Meant for MODE = "Th-BC" and periods that include the cold months (e.g. the full year).
 # The heating need does not depend on the efficiency; the final energy does.
-HEATING            = False
+HEATING            = True
 HEATING_SETPOINT   = 19.0      # [°C] occupied
 HEATING_SETBACK    = 16.0      # [°C] reduced
 HEATING_EFFICIENCY = 1.0       # COP / efficiency (1.0 = ideal electric heater)
@@ -182,7 +186,7 @@ COMFORT_MAP   = "RE2020"              # "RE2020": zone between the heating setpo
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 2. COMMAND LINE (optional: overrides the configuration above)
+# 2. COMMAND LINE
 # ══════════════════════════════════════════════════════════════════════════════
 
 _ap = argparse.ArgumentParser(description="Hygrothermal simulation of a room.")
