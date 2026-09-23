@@ -715,15 +715,15 @@ def plot_series():
     save_fig(fig, "series_T_RH", bbox_inches="tight")
 
 
-# ── 8.3 In-wall profiles (hottest and coldest day) ────────────────────────────
+# ── 8.3 In-wall profiles (hottest and coldest day): T, RH, vapour pressure ────
 def plot_profiles():
     print("  Plotting: wall_profiles ...")
     hot_colors  = ["#1F5F99", "#E07020", "#CC3030", "#2E8B57", "#8E44AD"]
     cold_colors = ["#6699CC", "#FF9944", "#EE6655", "#66BB88", "#BB88DD"]
     names = list(ORIENT)
-    fig, axes = plt.subplots(2, len(PROFILE_WALLS), figsize=(7.5 * len(PROFILE_WALLS), 10),
+    fig, axes = plt.subplots(3, len(PROFILE_WALLS), figsize=(7.5 * len(PROFILE_WALLS), 13),
                              constrained_layout=True, squeeze=False)
-    fig.suptitle(f"Profils de température et d'HR dans les parois\n"
+    fig.suptitle(f"Profils de température, d'HR et de pression de vapeur dans les parois\n"
                  f"Jour le + chaud : {fmt_date(HOTTEST)}  |  Jour le + froid : {fmt_date(COLDEST)}  |  "
                  f"{DESCRIPTION}", fontsize=11, fontweight="bold")
 
@@ -731,14 +731,18 @@ def plot_profiles():
         wall = sim.walls[names.index(name)]
         x_cm = wall.layer.x_pos * 100
         thick_cm = THICKNESS[name] * 100
-        axT, axH = axes[0, col], axes[1, col]
+        axT, axH, axP = axes[0, col], axes[1, col], axes[2, col]
         for h, c_hot, c_cold in zip(PROFILE_HOURS, hot_colors, cold_colors):
             i_hot, i_cold = HOTTEST * S + h, COLDEST * S + h
+            Pv_hot,  _, _ = wall_fields(wall, i_hot)
+            Pv_cold, _, _ = wall_fields(wall, i_cold)
             axT.plot(x_cm, wall.StockT[i_hot].flatten() - 273.15,  color=c_hot,  lw=2.5)
             axT.plot(x_cm, wall.StockT[i_cold].flatten() - 273.15, color=c_cold, lw=2.0, ls="--")
             axH.plot(x_cm, wall.StockRH[i_hot].flatten() * 100,    color=c_hot,  lw=2.5)
             axH.plot(x_cm, wall.StockRH[i_cold].flatten() * 100,   color=c_cold, lw=2.0, ls="--")
-        for ax in (axT, axH):
+            axP.plot(x_cm, Pv_hot,                                 color=c_hot,  lw=2.5)
+            axP.plot(x_cm, Pv_cold,                                color=c_cold, lw=2.0, ls="--")
+        for ax in (axT, axH, axP):
             for b in wall.layer.layer_bounds * 100:
                 ax.axvline(b, color="#CCCCCC", lw=1.2, ls="--")
             for i, m in enumerate(wall.layer.mat):
@@ -754,8 +758,10 @@ def plot_profiles():
         axT.set_title(f"Paroi {WALL_FR[name]} — Température [°C]", fontsize=11, fontweight="bold")
         axT.set_ylabel("T [°C]", fontsize=11); axT.tick_params(labelbottom=False)
         axH.set_title(f"Paroi {WALL_FR[name]} — Humidité relative [%]", fontsize=11, fontweight="bold")
-        axH.set_ylabel("HR [%]", fontsize=11); axH.set_ylim(0, 105)
-        axH.set_xlabel("Position dans la paroi [cm]   (ext → int)", fontsize=10)
+        axH.set_ylabel("HR [%]", fontsize=11); axH.set_ylim(0, 105); axH.tick_params(labelbottom=False)
+        axP.set_title(f"Paroi {WALL_FR[name]} — Pression de vapeur Pv [Pa]", fontsize=11, fontweight="bold")
+        axP.set_ylabel("Pv [Pa]", fontsize=11)
+        axP.set_xlabel("Position dans la paroi [cm]   (ext → int)", fontsize=10)
         y_top = axT.get_ylim()[1]
         axT.text(0.8, y_top, "EXT", fontsize=9, color="#888888", va="top")
         axT.text(thick_cm - 0.8, y_top, "INT", fontsize=9, color="#888888", va="top", ha="right")
