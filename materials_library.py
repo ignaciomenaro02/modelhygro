@@ -235,6 +235,31 @@ class Vapor_Barrier:
     def delta_l(T, RH):  return 0.0
 
 
+class Rain_Barrier:
+    """
+    Breathable roof membrane ("pare-pluie" / weather-resistive barrier), 2 mm.
+    The opposite of Vapor_Barrier: stops liquid water, stays open to vapour
+    (Sd = mu * e = 10 * 0.002 ≈ 0.02 m, typical of a high-performance synthetic
+    breather membrane) so moisture can still dry outward through the roof.
+    Negligible thermal resistance and negligible moisture storage either way.
+    Generic estimate (nonwoven/film laminate) — no specific manufacturer datasheet.
+    """
+    def rho(T, RH):   return 300
+    def Cp(T, RH):    return 1800
+    def k(T, RH):     return 0.20
+
+    def w(T, RH):
+        return 0.0 * np.ones_like(np.atleast_1d(RH))   # negligible
+
+    def mu(T, RH):       return 10        # vapour-open → Sd = mu * e ≈ 0.02 m
+    def delta_p(T, RH):  return lib.Da(T) / Rain_Barrier.mu(T, RH)
+    def Avalue(T, RH):   return 0.0
+    def wf(T, RH):       return 0.1
+
+    def Dw(T, RH):       return 0.0
+    def delta_l(T, RH):  return 0.0
+
+
 class Earth_Plaster:
     """
     Earth / clay plaster.

@@ -88,15 +88,18 @@ class Wall:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def step(self, T_ext, RH_ext, T_int, RH_int, dt):
+    def step(self, T_ext, RH_ext, T_int, RH_int, dt, Pv_ext=None):
         """
         Advance the wall by one time step *dt* [s].
 
         Parameters
         ----------
-        T_ext, T_int : float   Outdoor / indoor air temperature [K].
+        T_ext, T_int : float   Outdoor (or sol-air) / indoor temperature [K].
         RH_ext, RH_int: float  Outdoor / indoor relative humidity [-].
         dt           : float   Time step [s].
+        Pv_ext       : float   Outdoor vapour pressure [Pa]. Pass it whenever T_ext is a sol-air
+                               temperature: RH_ext belongs to the outdoor AIR temperature, so
+                               Pv(T_ext, RH_ext) would overestimate the vapour pressure in the sun.
 
         Method: build the implicit system M·U = N for this step and solve it,
         then recover RH from the new (Pc, T) via Kelvin's law.
@@ -105,7 +108,7 @@ class Wall:
 
         # Boundary condition vector  [Pv_ext, Pv_int, T_ext, T_int]
         L = np.array([
-            [lib.Pv(T_ext, RH_ext)],
+            [lib.Pv(T_ext, RH_ext) if Pv_ext is None else float(Pv_ext)],
             [lib.Pv(T_int, RH_int)],
             [float(T_ext)],
             [float(T_int)],

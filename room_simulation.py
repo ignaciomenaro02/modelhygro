@@ -363,7 +363,9 @@ class RoomSimulation:
                 T_sol_air_K = T_ext_K + alpha * I_sol / cfg.h_ext
             else:
                 T_sol_air_K = T_ext_K
-            wall_obj.step(T_sol_air_K, RH_ext, T_room_new_K, self.RH_room, dt)
+            # the vapour pressure is the one of the outdoor AIR (T_ext, RH_ext), not of the
+            # sol-air temperature: the sun heats the surface, it does not add water vapour
+            wall_obj.step(T_sol_air_K, RH_ext, T_room_new_K, self.RH_room, dt, Pv_ext=Pv_ext)
 
         # ── 12. RE2020 discomfort ──────────────────────────────────────────────
         if self.re2020_ev is not None:

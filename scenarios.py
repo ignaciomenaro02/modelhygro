@@ -64,7 +64,8 @@ SCENARIOS = {
     },
     "hemp_film": {
         "WALL_STACK": [("Hempcrete", 0.30)], "HYGRO_EFFECT": True,
-        "WALL_INTERIOR_SD": {"South": _FILM, "North": _FILM, "East": _FILM, "West": _FILM},
+        "WALL_INTERIOR_SD": {"South": _FILM, "North": _FILM, "East": _FILM, "West": _FILM,
+                             "Roof": _FILM},     # the roof too, since ROOF = True adds one
         "note": "same walls with a PE film (Sd = 100 m) inside: no moisture exchange with the room "
                 "(the vapour barrier is a surface resistance, not a layer)",
     },

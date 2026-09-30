@@ -76,7 +76,7 @@ MODE = "Th-BC"       # "Th-D" = summer comfort (with heat wave) | "Th-BC" = typi
 #   Full year :  "01/01" → "01/01"   (start = end means 365 days)
 #   If END < START the period wraps over the new year (e.g. "01/11" → "01/03").
 START_DATE = "01/01"
-END_DATE   = "01/01"
+END_DATE   = "10/01"
 
 # Spin-up: walls keep their moisture for months, so starting them at the outdoor state of the
 # first hour distorts the results (indoor RH, latent exchange, even comfort). The run therefore
@@ -103,6 +103,24 @@ WALL_STACK = [("Hempcrete", 0.30)]
 
 # Keys: South, North, East, West. Give a wall its own list to make it different.
 WALL_LAYERS = {"South": WALL_STACK, "North": WALL_STACK, "East": WALL_STACK, "West": WALL_STACK}
+
+# ── Roof (top envelope, optional) ──────────────────────────────────────────────
+# ROOF = True adds a 5th, horizontal wall on top of the room (its own coupled T/RH solve,
+# same physics as the 4 vertical walls). ROOF = False: the ceiling is only INTERNAL_MASS,
+# as before (no separate roof wall, no roof-specific plots).
+# Layers, OUTSIDE (top) to INSIDE (room ceiling): insulation, structural slab.
+ROOF       = True
+ROOF_STACK = [("Rock_Wool", 0.20), ("Concrete", 0.20)]
+# The pare-pluie/rain-barrier membrane is NOT put in ROOF_STACK as a physical layer: at 2 mm
+# next to two 20 cm layers, the mesh (uniform element size, same rule as MESH_SIZE below) would
+# have to shrink to ~1 mm everywhere in the roof to represent it correctly, which multiplies the
+# roof's node count ~10x and its linear-solve cost ~1000x (N_tot 41 -> 403; the solve is O(N_tot^3)
+# per wall per hour) for a layer whose own thermal resistance and mass are negligible anyway.
+# Instead it is added as a pure vapour-resistance boundary at the EXTERIOR surface (same trick as
+# WALL_INTERIOR_SD, mirrored to the outside): equivalent air-layer thickness Sd = mu * e [m].
+ROOF_EXTERIOR_SD = 10 * 0.002   # Rain_Barrier: mu=10, e=2 mm -> Sd = 0.02 m
+if ROOF:
+    WALL_LAYERS["Roof"] = ROOF_STACK
 
 # ── Windows (orientation "S", "N", "E" or "W") ────────────────────────────────
 # The opaque area of each wall is computed automatically: length × height − windows.
@@ -172,7 +190,12 @@ HYGRO_EFFECT  = True       # False = walls impermeable to vapour (heat only)
 # Typical Sd: paint 0.05–0.5 m, PE film ≈ 100 m (Bui used 0.5 m for a conventional coating).
 WALL_INTERIOR_SD = {}      # e.g. {"North": 100.0, "East": 100.0}
 
-H_EXT, H_INT  = 25.0, 8.0  # convective coefficients [W/(m²·K)]
+H_EXT, H_INT  = 25.0, 8.0  # surface heat transfer, convection + radiation [W/(m²·K)]
+                           # (EN ISO 6946: Rse = 0.04, Rsi = 0.13 m²·K/W)
+# Convective part only: the vapour coefficients follow from it (Lewis relation, below);
+# radiation moves heat but no water vapour. EN ISO 6946 Annex: h_c,ext = 4 + 4·v (v = 4 m/s),
+# h_c,int = 2.5 W/(m²·K) for a vertical wall (horizontal heat flow).
+H_C_EXT, H_C_INT = 20.0, 2.5
 MESH_SIZE     = 0.01       # mesh size inside the wall [m]
 DT            = 3600.0     # time step [s] — schedules and weather are hourly: do not change
 
@@ -215,9 +238,9 @@ if _args.scenario:
         if _bad:
             raise SystemExit(f"Scenario '{_name}': unknown parameter(s) {_bad}. "
                              f"Use the upper-case variable names of simulation.py section 1.")
-        if "WALL_STACK" in _ov:                                   # one stack for all four walls
-            WALL_STACK  = _ov.pop("WALL_STACK")
-            WALL_LAYERS = {n: WALL_STACK for n in WALL_LAYERS}
+        if "WALL_STACK" in _ov:                                   # the four vertical walls only
+            WALL_STACK  = _ov.pop("WALL_STACK")                   # (never touches "Roof", set apart)
+            WALL_LAYERS = {**WALL_LAYERS, **{n: WALL_STACK for n in ("South", "North", "East", "West")}}
         if "WALL_LAYERS" in _ov:                                  # only the listed walls change
             WALL_LAYERS = {**WALL_LAYERS, **_ov.pop("WALL_LAYERS")}
         globals().update(_ov)
@@ -257,13 +280,21 @@ def day_date(k, start_doy=None):
 FLOOR_AREA    = LX * LY
 VOLUME        = LX * LY * H
 INTERNAL_MASS = 110e3 * FLOOR_AREA          # [J/K] ISO 13790, medium inertia
-HM_EXT        = 25e-9 if HYGRO_EFFECT else 1e-30
-HM_INT        = HM_EXT * (H_INT / H_EXT)
+# Surface vapour transfer coefficients [kg/(m²·s·Pa)], Lewis relation (Le ≈ 1 for air):
+#   beta = h_c / (rho_air · cp_air · Rv · T)   at T = 20 °C
+#   -> exterior ≈ 1.2e-7, interior ≈ 1.5e-8 (NORDTEST surface resistance ~5e7 Pa·m²·s/kg ↔ 2e-8)
+# Before: HM_EXT = 25e-9 and HM_INT = HM_EXT·H_INT/H_EXT = 8e-9, i.e. ~5 and ~2 times too low.
+_LEWIS        = 1.0 / (1.2 * lib.CpA * lib.Rv * 293.15)
+HM_EXT        = H_C_EXT * _LEWIS if HYGRO_EFFECT else 1e-30
+HM_INT        = H_C_INT * _LEWIS if HYGRO_EFFECT else 1e-30
 
 ORIENT    = {"South": "S", "North": "N", "East": "E", "West": "W"}
 WIDTH     = {"South": LX, "North": LX, "East": LY, "West": LY}
+WALL_FR   = {"South": "Sud", "North": "Nord", "East": "Est", "West": "Ouest",
+             "Roof": "Toiture"}   # graphics are in French
+if ROOF:
+    ORIENT["Roof"] = "roof"      # tilt 0°, area LX×LY: handled separately in create_walls()
 THICKNESS = {n: sum(e for _, e in WALL_LAYERS[n]) for n in ORIENT}
-WALL_FR   = {"South": "Sud", "North": "Nord", "East": "Est", "West": "Ouest"}   # graphics are in French
 
 def describe_layers(layers):
     return " + ".join(f"{m} {e*100:g} cm" for m, e in layers)
@@ -273,8 +304,8 @@ def wall_u_value(layers):
     R = 1.0 / H_INT + 1.0 / H_EXT + sum(e / _MAT_REGISTRY[m].k(293.15, 0.5) for m, e in layers)
     return 1.0 / R
 
-DESCRIPTION = (describe_layers(WALL_LAYERS["South"])
-               if all(WALL_LAYERS[n] == WALL_LAYERS["South"] for n in ORIENT)
+DESCRIPTION = (describe_layers(WALL_LAYERS["South"])   # roof excluded: it is meant to differ
+               if all(WALL_LAYERS[n] == WALL_LAYERS["South"] for n in ("South", "North", "East", "West"))
                else "parois mixtes")
 
 
@@ -329,7 +360,11 @@ def create_walls(quiet=False):
     walls = []
     for name, ori in ORIENT.items():
         layers = WALL_LAYERS[name]
-        area   = WIDTH[name] * H - sum(w.area for w in WINDOWS if w.orientation == ori)
+        if name == "Roof":
+            area, tilt = LX * LY, 0.0          # floor-plan area, horizontal (no skylights)
+        else:
+            area = WIDTH[name] * H - sum(w.area for w in WINDOWS if w.orientation == ori)
+            tilt = 90.0                        # vertical
         # a thin layer needs a finer mesh (at least 2 nodes per layer)
         mesh = min(MESH_SIZE, min(e for _, e in layers) / 2)
         if mesh < MESH_SIZE and not quiet:
@@ -338,8 +373,11 @@ def create_walls(quiet=False):
         #   1/hm_eff = 1/hm_int + Sd/delta_air
         sd     = WALL_INTERIOR_SD.get(name, 0.0)
         hm_int = 1.0 / (1.0 / HM_INT + sd / lib.Da(293.15)) if sd > 0 else HM_INT
-        walls.append(make_wall(name, area=area, orientation=ori, layers=layers,
-                               mesh_size=mesh, h_ext=H_EXT, hm_ext=HM_EXT,
+        # same trick on the EXTERIOR side, used only for the roof's rain-barrier membrane
+        sd_ext = ROOF_EXTERIOR_SD if (name == "Roof" and ROOF) else 0.0
+        hm_ext = 1.0 / (1.0 / HM_EXT + sd_ext / lib.Da(293.15)) if sd_ext > 0 else HM_EXT
+        walls.append(make_wall(name, area=area, orientation=ori, layers=layers, tilt=tilt,
+                               mesh_size=mesh, h_ext=H_EXT, hm_ext=hm_ext,
                                h_int=H_INT, hm_int=hm_int))
     return walls
 
@@ -629,6 +667,16 @@ def plot_3d():
     ax.add_collection3d(Poly3DCollection([[[0,0,0],[LX,0,0],[LX,LY,0],[0,LY,0]]], alpha=0.30,
                         facecolor="#E8D8B0", edgecolor="#999999", linewidth=0.6))
 
+    # Roof: a horizontal slab on top of the walls, same thickness build-up as the other walls
+    if ROOF:
+        tR = THICKNESS["Roof"]
+        ax.add_collection3d(Poly3DCollection(faces(-tW, LX+tE, -tS, LY+tN, H, H+tR), alpha=0.78,
+                            facecolor="#C9C0A8", edgecolor="#444444", linewidth=0.5))
+        ax.text(LX/2, LY/2, H+tR/2, WALL_FR["Roof"], ha="center", va="center", fontsize=11,
+                fontweight="bold", color="#222222", zorder=1000,
+                bbox=dict(boxstyle="round,pad=0.15", fc="#C9C0A8", ec="#444444",
+                          alpha=0.85, linewidth=0.8))
+
     # Windows (one per orientation, with the total window area of that orientation)
     length = {"S": LX, "N": LX, "E": LY, "W": LY}
     for ori in "SNEW":
@@ -889,8 +937,9 @@ def plot_wall_fields(day, kind, file_name):
     print(f"  Plotting: {file_name} ...")
     colors = ["#1F5F99", "#E07020", "#CC3030", "#2E8B57", "#8E44AD", "#7F7F7F"]
     names  = list(ORIENT)
-    fig, axes = plt.subplots(3, 4, figsize=(20, 11.5), constrained_layout=True, sharex="col")
-    fig.suptitle(f"Champs dans les 4 parois — {kind} : {fmt_date(day)}  "
+    fig, axes = plt.subplots(3, len(names), figsize=(5 * len(names), 11.5),
+                             constrained_layout=True, sharex="col", squeeze=False)
+    fig.suptitle(f"Champs dans les {len(names)} parois — {kind} : {fmt_date(day)}  "
                  f"(T ext max {T_out_max[day]:.1f} °C, min {T_out_min[day]:.1f} °C)  |  {DESCRIPTION}",
                  fontsize=12, fontweight="bold")
     rows = [("Pression de vapeur  Pv [Pa]", 1.0), ("Pression capillaire  Pc [MPa]", 1e6),

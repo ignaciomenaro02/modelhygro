@@ -27,7 +27,7 @@ import library as lib
 from materials_library import (
     Rammed_Earth, Hempcrete,
     Rock_Wool, Wood_Fiber, Concrete, Wood,
-    Vapor_Barrier, Earth_Plaster, Gypsum_Plaster,
+    Vapor_Barrier, Rain_Barrier, Earth_Plaster, Gypsum_Plaster,
     Lime_Plaster, Fermacell, BA13,
 )
 
@@ -41,6 +41,7 @@ _MAT_REGISTRY = {
     "BA13":           BA13,
     "Earth_Plaster":  Earth_Plaster,
     "Vapor_Barrier":  Vapor_Barrier,
+    "Rain_Barrier":   Rain_Barrier,
     "Gypsum_Plaster": Gypsum_Plaster,
     "Rock_Wool":      Rock_Wool,
     "Wood_Fiber":     Wood_Fiber,
