@@ -74,8 +74,12 @@ class WallLayer:
     emat : list of float
         Thickness [m] of each layer (same order as mat).
     Mesh_Opt : int
-        0 = uniform mesh (default)
+        0 = uniform mesh (default): one element size for the whole wall
         1 = graded mesh (refined near surfaces — better for transient)
+        2 = per-layer mesh: each layer is split into equal elements of about mesh_size,
+            with at least 2 elements per layer. A thin layer is refined on its own
+            without refining the rest of the wall, and every layer keeps its exact
+            thickness (with option 0, a layer thinner than mesh_size is misrepresented).
     liq : int
         Liquid transport:  0 = vapour only,  1 = Dw formulation.
     mesh_size : float
@@ -118,7 +122,25 @@ class WallLayer:
             return self._uniform_mesh()
         if self.Mesh_Opt == 1:
             return self._refined_mesh()
-        raise ValueError(f"Unknown Mesh_Opt={self.Mesh_Opt}. Use 0 (uniform) or 1 (graded).")
+        if self.Mesh_Opt == 2:
+            return self._layered_mesh()
+        raise ValueError(f"Unknown Mesh_Opt={self.Mesh_Opt}. Use 0 (uniform), 1 (graded) "
+                         f"or 2 (per layer).")
+
+    def _layered_mesh(self, min_elements=2):
+        """Equal elements inside each layer: n_i = max(2, round(e_i / mesh_size)), h_i = e_i / n_i.
+        Same node layout as _uniform_mesh (node 0 at the exterior surface, the node on an
+        interface belongs to the layer on its exterior side), only the spacing differs per layer."""
+        n = np.array([max(min_elements, int(round(e / self.mesh_size))) for e in self.emat])
+        dx = np.concatenate([[0.0]] + [np.full(k, e / k) for k, e in zip(n, self.emat)])
+        dx = dx.reshape(-1, 1)
+        N_nodes = n.astype(float).reshape(-1, 1)
+        N_nodes[0] += 1
+        N_tot = len(dx)
+        N_sum = np.zeros([self.Nb_layer + 1, 1])
+        for i in range(self.Nb_layer):
+            N_sum[i + 1] = N_nodes[i] + N_sum[i]
+        return dx, N_nodes, N_tot, N_sum
 
     def _uniform_mesh(self):
         size = self.mesh_size

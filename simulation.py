@@ -108,17 +108,13 @@ WALL_LAYERS = {"South": WALL_STACK, "North": WALL_STACK, "East": WALL_STACK, "We
 # ROOF = True adds a 5th, horizontal wall on top of the room (its own coupled T/RH solve,
 # same physics as the 4 vertical walls). ROOF = False: the ceiling is only INTERNAL_MASS,
 # as before (no separate roof wall, no roof-specific plots).
-# Layers, OUTSIDE (top) to INSIDE (room ceiling): insulation, structural slab.
+# Layers, OUTSIDE (top) to INSIDE (room ceiling): rain barrier (pare-pluie), insulation, slab.
+# The 2 mm membrane is a real layer: the per-layer mesh (MESH_OPT = 2) refines it on its own.
 ROOF       = True
-ROOF_STACK = [("Rock_Wool", 0.20), ("Concrete", 0.20)]
-# The pare-pluie/rain-barrier membrane is NOT put in ROOF_STACK as a physical layer: at 2 mm
-# next to two 20 cm layers, the mesh (uniform element size, same rule as MESH_SIZE below) would
-# have to shrink to ~1 mm everywhere in the roof to represent it correctly, which multiplies the
-# roof's node count ~10x and its linear-solve cost ~1000x (N_tot 41 -> 403; the solve is O(N_tot^3)
-# per wall per hour) for a layer whose own thermal resistance and mass are negligible anyway.
-# Instead it is added as a pure vapour-resistance boundary at the EXTERIOR surface (same trick as
-# WALL_INTERIOR_SD, mirrored to the outside): equivalent air-layer thickness Sd = mu * e [m].
-ROOF_EXTERIOR_SD = 10 * 0.002   # Rain_Barrier: mu=10, e=2 mm -> Sd = 0.02 m
+ROOF_STACK = [("Rain_Barrier", 0.002), ("Rock_Wool", 0.20), ("Concrete", 0.20)]
+# ROOF_HYGRO = False: the roof is THERMAL only — no vapour exchange with the outdoor air nor with
+# the room, so the moisture results come from the four walls alone (the roof still exchanges heat).
+ROOF_HYGRO = False
 if ROOF:
     WALL_LAYERS["Roof"] = ROOF_STACK
 
@@ -196,7 +192,11 @@ H_EXT, H_INT  = 25.0, 8.0  # surface heat transfer, convection + radiation [W/(m
 # radiation moves heat but no water vapour. EN ISO 6946 Annex: h_c,ext = 4 + 4·v (v = 4 m/s),
 # h_c,int = 2.5 W/(m²·K) for a vertical wall (horizontal heat flow).
 H_C_EXT, H_C_INT = 20.0, 2.5
-MESH_SIZE     = 0.01       # mesh size inside the wall [m]
+MESH_OPT      = 2          # 2 = per-layer mesh: each layer in equal elements of ~MESH_SIZE,
+                           #     at least 2 per layer (thin layers refined on their own)
+                           # 0 = one element size for the whole wall (old behaviour)
+MESH_SIZE      = 0.01      # element size in the walls [m]
+MESH_SIZE_ROOF = 0.01      # element size in the roof [m]
 DT            = 3600.0     # time step [s] — schedules and weather are hourly: do not change
 
 # ── Graphics ──────────────────────────────────────────────────────────────────
@@ -365,19 +365,21 @@ def create_walls(quiet=False):
         else:
             area = WIDTH[name] * H - sum(w.area for w in WINDOWS if w.orientation == ori)
             tilt = 90.0                        # vertical
-        # a thin layer needs a finer mesh (at least 2 nodes per layer)
-        mesh = min(MESH_SIZE, min(e for _, e in layers) / 2)
-        if mesh < MESH_SIZE and not quiet:
-            print(f"  [!] Thin layer in {name}: mesh reduced to {mesh*1000:g} mm (slower run)")
+        mesh = MESH_SIZE_ROOF if name == "Roof" else MESH_SIZE
+        if MESH_OPT == 0:
+            # one element size for the whole wall: a thin layer forces it down everywhere
+            mesh = min(mesh, min(e for _, e in layers) / 2)
+            if mesh < MESH_SIZE and not quiet:
+                print(f"  [!] Thin layer in {name}: mesh reduced to {mesh*1000:g} mm (slower run)")
         # interior vapour resistance in series with the surface transfer coefficient:
         #   1/hm_eff = 1/hm_int + Sd/delta_air
         sd     = WALL_INTERIOR_SD.get(name, 0.0)
         hm_int = 1.0 / (1.0 / HM_INT + sd / lib.Da(293.15)) if sd > 0 else HM_INT
-        # same trick on the EXTERIOR side, used only for the roof's rain-barrier membrane
-        sd_ext = ROOF_EXTERIOR_SD if (name == "Roof" and ROOF) else 0.0
-        hm_ext = 1.0 / (1.0 / HM_EXT + sd_ext / lib.Da(293.15)) if sd_ext > 0 else HM_EXT
+        hm_ext = HM_EXT
+        if name == "Roof" and not ROOF_HYGRO:
+            hm_int = hm_ext = 1e-30             # thermal only: no vapour exchange on either face
         walls.append(make_wall(name, area=area, orientation=ori, layers=layers, tilt=tilt,
-                               mesh_size=mesh, h_ext=H_EXT, hm_ext=hm_ext,
+                               Mesh_Opt=MESH_OPT, mesh_size=mesh, h_ext=H_EXT, hm_ext=hm_ext,
                                h_int=H_INT, hm_int=hm_int))
     return walls
 
