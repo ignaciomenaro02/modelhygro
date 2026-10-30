@@ -30,7 +30,9 @@ What is implemented
                     then stays on until the end of the year
    The tests run every day at 09:00 on the previous 24 hours.
    In Th-D mode heating is never allowed during the adaptive-comfort period.
-3. Optional fixed calendar (season_window): the season is a given window of days of the
+3. Internal gains (internal_gains_series): occupants, equipment and lighting of the same
+   workbook, with the conventional number of equivalent adults of the dwelling.
+4. Optional fixed calendar (season_window): the season is a given window of days of the
    year instead of the algorithm above. Used to compare designs at the same heating service,
    because the RE2020 algorithm opens the season at different dates for different walls.
 
@@ -69,6 +71,50 @@ THRESHOLD_STOP  = 2.0      # [Wh/m²]  mean hourly heating need per m²
 WINDOW_DAYS     = 28
 MAX_RESTARTS    = 1
 ADAPTIVE_TRM    = 16.0     # [°C]     running-mean outdoor temperature bounding the adaptive-comfort period
+
+
+# Hours with the occupants awake and at home (1) or asleep / away (0): it is the lighting
+# scenario of the workbook, and the hours where equipment and occupants give their full gains.
+_AWAKE_WEEKDAY   = "000000111" + "00000000" + "11111" + "00"     # 06h-09h, 17h-22h
+_AWAKE_WEDNESDAY = "000000111" + "0000"     + "111111111" + "00" # 06h-09h, 13h-22h
+_AWAKE_WEEKEND   = "000000" + "1" * 16 + "00"                    # 06h-22h
+AWAKE = [_AWAKE_WEEKDAY, _AWAKE_WEEKDAY, _AWAKE_WEDNESDAY, _AWAKE_WEEKDAY,
+         _AWAKE_WEEKDAY, _AWAKE_WEEKEND, _AWAKE_WEEKEND]
+
+# Conventional gains (workbook sheet MI, Annex III §2.1.1.2 and §7.1)
+GAIN_ADULT_W      = 90.0      # [W]       sensible heat of an adult at rest
+MOIST_ADULT_KG_H  = 0.055     # [kg/h]    water vapour of an adult at rest
+SLEEP_RATIO       = 0.7       # asleep: 63 W and 0.0385 kg/h
+EQUIP_W_M2        = 5.7       # [W/m²]    equipment, occupants awake at home
+EQUIP_LOW_RATIO   = 0.2       # 1.14 W/m² asleep or away; 0 during the holiday week
+LIGHT_W_M2        = 1.4       # [W/m²]    lighting when there is not enough daylight
+
+
+def n_adeq(area_per_dwelling):
+    """Conventional number of equivalent adults of a dwelling (Annex III eq. 35-36)."""
+    s = float(area_per_dwelling)
+    n_max = 1.0 if s < 10 else (1.75 - 0.01875 * (50.0 - s) if s <= 50 else 0.035 * s)
+    return n_max if n_max < 1.75 else 1.75 + 0.3 * (n_max - 1.75)
+
+
+def internal_gains_series(start_doy, n_steps):
+    """
+    Hourly RE2020 ratios for a dwelling, same calendar as occupancy_series:
+      occupants : 1 awake at home, 0.7 asleep, 0 away (multiply by N_adeq x 90 W / 0.055 kg/h)
+      equipment : 1 awake at home, 0.2 otherwise, 0 in the holiday week (x 5.7 W/m²)
+      lighting  : 1 awake at home, 0 otherwise (x 1.4 W/m², no daylight)
+    """
+    occ, equip, light = np.zeros(n_steps), np.zeros(n_steps), np.zeros(n_steps)
+    for s in range(n_steps):
+        doy  = (int(start_doy) - 1 + s // 24) % 365 + 1
+        wd, h = (doy - 1) % 7, s % 24
+        if doy in HOLIDAY_DAYS:
+            continue
+        awake = AWAKE[wd][h] == "1"
+        occ[s]   = (1.0 if awake else SLEEP_RATIO) if PATTERN[wd][h] == "1" else 0.0
+        equip[s] = 1.0 if awake else EQUIP_LOW_RATIO
+        light[s] = 1.0 if awake else 0.0
+    return occ, equip, light
 
 
 def occupancy_series(start_doy, n_steps):

@@ -65,6 +65,10 @@ class RoomSimulation:
     T_room_init    : float   Initial room temperature [°C].
     RH_room_init   : float   Initial room relative humidity [-].
     re2020         : RE2020Evaluator  (optional, pass None to skip)
+    wall_substeps  : int     Number of wall sub-steps per room step. The wall coefficients are
+                             evaluated at the start of each wall step; with a 1 h step a wet
+                             exterior surface in the sun oscillates by several K from one hour to
+                             the next. 6 sub-steps (600 s) agree with 60 within 0.1 K.
     """
 
     def __init__(
@@ -79,12 +83,13 @@ class RoomSimulation:
         ventilation     = None,
         hvac            = None,
         solar_calc      = None,
-        volume          = 150.0,
-        internal_mass   = 0.0,
+        volume          = None,
+        internal_mass   = None,
         T_room_init     = 20.0,
-        RH_room_init    = 0.50,
+        RH_room_init    = 0.5,
         re2020          = None,
         vapor_sources   = None,   # list of VaporSourceConfig
+        wall_substeps   = 1,
     ):
         self.wall_configs   = wall_configs
         self.window_configs = window_configs  or []
@@ -102,6 +107,8 @@ class RoomSimulation:
         self.internal_mass  = float(internal_mass)
         self.re2020_ev      = re2020
         self.vapor_sources  = vapor_sources or []
+        self.StockACH       = []                  # total air-change rate of each step [1/h]
+        self.wall_substeps  = max(1, int(wall_substeps))
 
         # Room state
         self.T_room  = float(T_room_init)    # [°C]
@@ -251,7 +258,7 @@ class RoomSimulation:
         # ── 6. Ventilation + infiltration (exchange with OUTDOOR air) ──────────
         n_ach = 0.0
         if self.ventilation is not None:
-            n_ach = self.ventilation.flow_at(self.step_count)
+            n_ach = self.ventilation.flow_at(self.step_count, self.T_room, T_ext_C)
         for op in self.opening_configs:
             n_ach += op.ach_contribution
 
@@ -261,8 +268,10 @@ class RoomSimulation:
         hrv_mois = getattr(self.ventilation, 'moisture_recovery', 0.0) if self.ventilation else 0.0
 
         G_vent_th = n_vol_s * rho_air * lib.CpA * (1.0 - hrv)             # [W/K]
-        # Moisture ventilation — split into cond+drive for implicit solve
-        _vent_mois_cond  = n_vol_s * rho_air / (lib.Rv * T_room_K) * (1.0 - hrv_mois)
+        # Moisture ventilation — split into cond+drive for implicit solve.
+        # Vapour mass flow = air flow × vapour density, rho_v = Pv / (Rv·T)  [kg/(s·Pa) × Pa].
+        # (rho_air was multiplied in by mistake before: 20 % too much vapour exchanged.)
+        _vent_mois_cond  = n_vol_s / (lib.Rv * T_room_K) * (1.0 - hrv_mois)
         G_mois_cond  += _vent_mois_cond
         G_mois_drive += _vent_mois_cond * Pv_ext
 
@@ -365,7 +374,11 @@ class RoomSimulation:
                 T_sol_air_K = T_ext_K
             # the vapour pressure is the one of the outdoor AIR (T_ext, RH_ext), not of the
             # sol-air temperature: the sun heats the surface, it does not add water vapour
-            wall_obj.step(T_sol_air_K, RH_ext, T_room_new_K, self.RH_room, dt, Pv_ext=Pv_ext)
+            # same boundary conditions over the whole step, only the final state is stored
+            n_sub = self.wall_substeps
+            for j in range(n_sub):
+                wall_obj.step(T_sol_air_K, RH_ext, T_room_new_K, self.RH_room, dt / n_sub,
+                              Pv_ext=Pv_ext, store=(j == n_sub - 1))
 
         # ── 12. RE2020 discomfort ──────────────────────────────────────────────
         if self.re2020_ev is not None:
@@ -381,6 +394,7 @@ class RoomSimulation:
         for cfg, qsw in zip(self.wall_configs, _q_sens_walls):
             self.StockQ_sens_walls[cfg.name].append(qsw)
         self.StockQ_lat_total.append(Q_lat_walls)
+        self.StockACH.append(n_ach)
 
         self.t_sim += dt
         self.step_count += 1

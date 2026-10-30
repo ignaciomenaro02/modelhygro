@@ -151,11 +151,33 @@ class VentilationConfig:
     moisture_recovery : float                   = 0.0
     air_velocity      : float                   = 0.1   # [m/s] — indoor air speed
     schedule          : Optional[List[float]]   = None
+    # Controlled overventilation (window opening by the occupants), added to n_ach:
+    #   allowed only at the steps where overvent_window is True; open when the room reaches
+    #   T_open, closed again below T_close (hysteresis), never when the outdoor air is not cooler
+    #   than the room, and scaled 0 → 1 between T_ext_min and T_ext_full outdoor (RE2020 manual
+    #   window management, Annex III §5.13: opening 23-25 °C, closing 22 °C, outdoor 10-18 °C).
+    overvent_ach      : float                   = 0.0
+    overvent_window   : Optional[List[bool]]    = None
+    T_open            : float                   = 23.0
+    T_close           : float                   = 22.0
+    T_ext_min         : float                   = 10.0
+    T_ext_full        : float                   = 18.0
+    _is_open          : bool                    = False
 
-    def flow_at(self, step: int) -> float:
-        """Effective air-change rate [1/h] at step `step`."""
+    def flow_at(self, step: int, T_room: float = None, T_ext: float = None) -> float:
+        """Effective air-change rate [1/h] at step `step` (room and outdoor temperatures in °C
+        at the start of the step, used only by the controlled overventilation)."""
         factor = self.schedule[step] if self.schedule is not None else 1.0
-        return self.n_ach * factor
+        n = self.n_ach * factor
+        if self.overvent_ach > 0 and self.overvent_window is not None and T_room is not None:
+            if T_room >= self.T_open:
+                self._is_open = True
+            elif T_room < self.T_close:
+                self._is_open = False
+            if self.overvent_window[step] and self._is_open and T_ext < T_room:
+                mod = min(1.0, max(0.0, (T_ext - self.T_ext_min) / (self.T_ext_full - self.T_ext_min)))
+                n += self.overvent_ach * mod
+        return n
 
 
 # ══════════════════════════════════════════════════════════════════════════════

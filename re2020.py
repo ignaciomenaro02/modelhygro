@@ -17,9 +17,10 @@ Cep,nr  Non-renewable primary energy [kWh_ep/(m²·an)]
         Same but excluding renewable sources (on-site PV, etc.).
 
 DH      Summer comfort indicator     [°C·h]
-        Official definition (Th-D mode): sum over the occupied hours of the excess of the
-        operative temperature over the adaptive-comfort limit
-        max(26, 0.33·T_rm + 18.8 + 2) for dwellings (add_adaptive_discomfort_hours).
+        Official definition (Th-D mode): sum, over the occupied hours of the adaptive-comfort
+        period, of the excess of the operative temperature over the hot-discomfort limit
+        (hot_discomfort_limit): for dwellings min(max(26, 0.33·T_rm + 20.8), 28) from 6 h to
+        22 h and 26 °C during the sleep period (add_adaptive_discomfort_hours).
         A simplified fixed-28 °C version is also kept (add_discomfort_hours).
         < 1250 for RE2020 compliance.
 
@@ -90,24 +91,51 @@ _ALPHA_HEAT  = 2.0
 _ALPHA_COOL  = 2.0
 _ALPHA_LIGHT = 5.0
 
-# Summer comfort (Th-D): adaptive-comfort upper limit in ambience category 1 (dwellings)
-#   T_max = max(T_cooling_setpoint, 0.33·T_rm + 18.8 + delta),  delta = 2 / 3 / 4 K for category 1 / 2 / 3
-# Th-BCE 2020, Annex III, "Indicateurs de confort" and Tableau 10 (dwellings: category 1)
+# Summer comfort (Th-D), Th-BCE 2020 Annex III §13.5.3 (C_BAT_Confort_d'été), eq. 2598-2606:
+#   T_inc_max = max(T_cooling_setpoint, 0.33·T_rm + 18.8 + delta),  delta = 2 / 3 / 4 K for category 1 / 2 / 3
+#   "valeur maximale": the limit never exceeds T_cooling_setpoint + 2 °C (Δθop_min_max)
+#   "valeur minimale": in dwellings, during the sleep period (legal hour h ≤ 6 or h > 22) the limit is
+#                      the cooling setpoint itself, without adaptive comfort
+#   DH counts only the occupied hours of the adaptive-comfort period (first to last day with T_rm > 16 °C)
 _DELTA_CATEGORY = {1: 2.0, 2: 3.0, 3: 4.0}
+_DELTA_OP_MIN_MAX = 2.0
+ADAPTIVE_TRM = 16.0
 
 
-def adaptive_discomfort(T_op, T_rm, occupied, T_cool_set: float = 26.0, category: int = 1):
+def hot_discomfort_limit(T_rm, hour, T_cool_set: float = 26.0, category: int = 1, dwelling: bool = True):
     """
-    Hourly summer discomfort [K] with the RE2020 adaptive-comfort definition:
-    excess of the operative temperature over
-        T_max = max(T_cool_set, 0.33·T_rm + 18.8 + delta(category)),
-    counted only in occupied hours (0 otherwise).
+    Hourly hot-discomfort limit [°C] of the DH indicator.
+    hour: hour of the day 0..23 of each step, the step covering [hour, hour + 1); its RE2020
+    legal hour is h_leg = hour + 1, so the day period 6 < h_leg <= 22 is hour = 6..21.
     """
-    T_op  = np.asarray(T_op,  dtype=float)
-    T_rm  = np.asarray(T_rm,  dtype=float)
-    occ   = np.asarray(occupied, dtype=float)
-    T_max = np.maximum(T_cool_set, 0.33 * T_rm + 18.8 + _DELTA_CATEGORY[category])
-    return np.maximum(T_op - T_max, 0.0) * occ
+    T_rm  = np.asarray(T_rm, dtype=float)
+    T_inc = np.maximum(T_cool_set, 0.33 * T_rm + 18.8 + _DELTA_CATEGORY[category])
+    T_day = np.minimum(T_inc, T_cool_set + _DELTA_OP_MIN_MAX)
+    if not dwelling:
+        return T_day
+    hour = np.asarray(hour) % 24
+    return np.where((hour >= 6) & (hour <= 21), T_day, T_cool_set)
+
+
+def adaptive_period(T_rm_day):
+    """Boolean per day: from the first to the last day of the year with T_rm > 16 °C."""
+    T_rm_day = np.asarray(T_rm_day, dtype=float)
+    out  = np.zeros(len(T_rm_day), dtype=bool)
+    warm = np.where(T_rm_day > ADAPTIVE_TRM)[0]
+    if len(warm):
+        out[warm[0]:warm[-1] + 1] = True
+    return out
+
+
+def adaptive_discomfort(T_op, T_rm, occupied, hour, in_period, T_cool_set: float = 26.0, category: int = 1):
+    """
+    Hourly summer discomfort [K], RE2020 definition: excess of the operative temperature over
+    hot_discomfort_limit, counted only in the occupied hours of the adaptive-comfort period.
+    """
+    T_op  = np.asarray(T_op, dtype=float)
+    keep  = np.asarray(occupied, dtype=bool) & np.asarray(in_period, dtype=bool)
+    T_max = hot_discomfort_limit(T_rm, hour, T_cool_set, category)
+    return np.maximum(T_op - T_max, 0.0) * keep
 
 
 class RE2020Evaluator:
@@ -221,25 +249,27 @@ class RE2020Evaluator:
         excess = np.maximum(T_arr - 28.0, 0.0)
         self._DH += float(excess.sum()) * (dt / 3600.0)   # [°C·h]
 
-    def add_adaptive_discomfort_hours(self, T_op, T_rm, occupied,
+    def add_adaptive_discomfort_hours(self, T_op, T_rm, occupied, hour, in_period,
                                       T_cool_set: float = 26.0, category: int = 1,
                                       dt: int = 3600):
         """
-        Official RE2020 summer-comfort indicator (DH), adaptive-comfort definition.
+        Official RE2020 summer-comfort indicator (DH).
 
-        Sum, over the OCCUPIED hours, of how far the operative temperature exceeds
-        T_max = max(T_cool_set, 0.33·T_rm + 18.8 + delta(category)).
+        Sum, over the OCCUPIED hours of the adaptive-comfort period, of how far the operative
+        temperature exceeds hot_discomfort_limit (see the module constants).
 
         Parameters
         ----------
         T_op      : array   Operative temperature [°C] (here: room air temperature).
         T_rm      : array   Running-mean outdoor temperature [°C], one value per step.
         occupied  : array   Occupancy indicator (bool / 0-1), one value per step.
+        hour      : array   Hour of the day 0..23 of each step.
+        in_period : array   True inside the adaptive-comfort period, one value per step.
         T_cool_set: float   Cooling setpoint in occupation [°C] (26 °C for dwellings).
         category  : int     Ambience category 1, 2 or 3 (dwellings: 1).
         dt        : int     Time step [s].
         """
-        excess = adaptive_discomfort(T_op, T_rm, occupied, T_cool_set, category)
+        excess = adaptive_discomfort(T_op, T_rm, occupied, hour, in_period, T_cool_set, category)
         self._DH_adapt = (self._DH_adapt or 0.0) + float(excess.sum()) * (dt / 3600.0)
 
     # ── Indicator calculation ──────────────────────────────────────────────────

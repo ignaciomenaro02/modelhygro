@@ -175,7 +175,7 @@ class WallLayer:
             j, m, converged = 1, 2, False
 
             while not converged:
-                n = int(N_nodes[i])
+                n = int(N_nodes[i, 0])
                 dx = np.zeros([n, 1])
                 dx[0] = u0
                 for k in range(n // 2 - j - 1):
@@ -216,8 +216,8 @@ class WallLayer:
     def _fill(self, prop, T, RH):
         out = np.zeros([self.N_tot, 1])
         for i in range(self.Nb_layer):
-            s = int(self.N_sum[i])
-            e = int(self.N_sum[i + 1])
+            s = int(self.N_sum[i, 0])
+            e = int(self.N_sum[i + 1, 0])
             out[s:e] = getattr(_MAT_REGISTRY[self.mat[i]], prop)(T[s:e], RH[s:e])
         return out
 

@@ -88,7 +88,7 @@ class Wall:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def step(self, T_ext, RH_ext, T_int, RH_int, dt, Pv_ext=None):
+    def step(self, T_ext, RH_ext, T_int, RH_int, dt, Pv_ext=None, store=True):
         """
         Advance the wall by one time step *dt* [s].
 
@@ -100,6 +100,8 @@ class Wall:
         Pv_ext       : float   Outdoor vapour pressure [Pa]. Pass it whenever T_ext is a sol-air
                                temperature: RH_ext belongs to the outdoor AIR temperature, so
                                Pv(T_ext, RH_ext) would overestimate the vapour pressure in the sun.
+        store        : bool    Append the new state to the result histories (False for the
+                               intermediate sub-steps of a longer step).
 
         Method: build the implicit system M·U = N for this step and solve it,
         then recover RH from the new (Pc, T) via Kelvin's law.
@@ -130,10 +132,11 @@ class Wall:
             np.exp(-self.Pc / (lib.rhoL * lib.Rv * self.T)), 1e-3, 1.0
         )
 
-        self.StockT.append(self.T.copy())
-        self.StockRH.append(self.RH.copy())
-        self.StockPc.append(self.Pc.copy())
-        self.Stockw.append(self.layer.w(self.T, self.RH))
+        if store:
+            self.StockT.append(self.T.copy())
+            self.StockRH.append(self.RH.copy())
+            self.StockPc.append(self.Pc.copy())
+            self.Stockw.append(self.layer.w(self.T, self.RH))
 
     def surface_fluxes(self):
         """
@@ -211,20 +214,26 @@ class Wall:
                 RH * lib.dPsat(T, RH) - lib.Pv(T, RH) * np.log(RH) / T
             )
         else:
+            # liquid flux -Dw·dw/dx with w(RH) and RH = exp(-Pc/(rhoL·Rv·T)) (Kelvin):
+            #   dRH/dPc = -RH/(rhoL·Rv·T) = RH·ln(RH)/Pc,   dRH/dT|Pc = -RH·ln(RH)/T
+            # (the RH factor was missing: liquid transport was overestimated by 1/RH,
+            #  found with HAMSTAD benchmark 2, see validation/hamstad_bm2.py)
             R11 = -(lay.delta_p(T, RH) * lib.rhoV(T, RH) / lib.rhoL
-                    - np.log(RH) * lay.Dw(T, RH) / lib.Pc(T, RH) * lay.Xi_RH(T, RH))
+                    - RH * np.log(RH) * lay.Dw(T, RH) / lib.Pc(T, RH) * lay.Xi_RH(T, RH))
             R12 = lay.delta_p(T, RH) * (
                 (RH * lib.dPsat(T, RH) - lib.Pv(T, RH) * np.log(RH) / T)
-                - np.log(RH) * lay.Dw(T, RH) / T * lay.Xi_RH(T, RH)
+                - RH * np.log(RH) * lay.Dw(T, RH) / T * lay.Xi_RH(T, RH)
             )
 
         C22 = lay.rho(T, RH) * lay.Cp(T, RH) + lay.w(T, RH) * lib.CpL
         R22 = lay.k(T, RH) + lib.Lv * lay.delta_p(T, RH) * (
             RH * lib.dPsat(T, RH) - lib.Pv(T, RH) * np.log(RH) / T
         )
+        # Heat balance of Bui et al. (2025), J. Build. Perform. Simul., Eq. (5): conduction + latent heat
+        # of the vapour (+Lv: it adds to k); no advection of sensible heat by the vapour (cp,v·T term
+        # removed, ~1.5 % of the latent term). The surface exchange keeps (cp,v·T + Lv)·g (their Eq. 12).
         R21 = (lay.delta_l(T, RH) * lib.CpL * T
-               - (lib.CpV * (T - 273.15) + lib.Lv)
-               * lay.delta_p(T, RH) * lib.rhoV(T, RH) / lib.rhoL)
+               - lib.Lv * lay.delta_p(T, RH) * lib.rhoV(T, RH) / lib.rhoL)
 
         k0 = (-lib.Psat(T, RH) / (lib.rhoL * lib.Rv * T)
               * np.exp(-lib.Pc(T, RH) / (lib.rhoL * lib.Rv * T)))
@@ -236,7 +245,9 @@ class Wall:
 
     def _Res(self, dt, T, C11, R11, R12, C22, R22, R21, k0):
         N  = self.layer.N_tot
-        dx = self.layer.dx
+        # 1-D views: each element is a scalar (recent NumPy refuses to put a 1-element array in a cell)
+        dx = self.layer.dx.ravel()
+        T, C11, R11, R12, C22, R22, R21, k0 = (np.ravel(a) for a in (T, C11, R11, R12, C22, R22, R21, k0))
 
         Res1 = np.zeros([N, N])
         Res2 = np.zeros([N, N])
@@ -294,7 +305,8 @@ class Wall:
 
     def _B(self, T):
         N  = self.layer.N_tot
-        dx = self.layer.dx
+        dx = self.layer.dx.ravel()
+        T  = np.ravel(T)
         B  = np.zeros([2*N, 4])
 
         B[0,     0] = 2 * self.hm_ext / dx[1]
@@ -308,7 +320,8 @@ class Wall:
 
     def _K(self, T, k1):
         N  = self.layer.N_tot
-        dx = self.layer.dx
+        dx = self.layer.dx.ravel()
+        T, k1 = np.ravel(T), np.ravel(k1)
         K  = np.zeros([2*N, 1])
 
         K[0]     = -2 * self.hm_ext * k1[0]   / dx[1]

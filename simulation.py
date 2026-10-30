@@ -55,8 +55,9 @@ from wall_layer      import _MAT_REGISTRY
 from sources         import (OccupantConfig, EquipmentConfig, LightingConfig,
                              VentilationConfig, HVACConfig, build_daily_schedule)
 from solar           import SolarCalculator
-from heating         import RE2020Heating, occupancy_series
-from re2020          import RE2020Evaluator, adaptive_discomfort
+import heating       as re_gains
+from heating         import RE2020Heating, occupancy_series, internal_gains_series, n_adeq
+from re2020          import RE2020Evaluator, adaptive_discomfort, hot_discomfort_limit, adaptive_period
 from room_simulation import RoomSimulation
 from weather         import load_weather_csv, load_re2020_weather
 
@@ -139,8 +140,21 @@ ACH_BASE      = 0.50
 ACH_OVERVENT  = 4.0
 NIGHT_HOURS   = list(range(0, 8)) + list(range(22, 24))    # 22h → 8h
 SUMMER_MONTHS = (5, 9)     # May–September: night overventilation active and comfort evaluated
+# OVERVENT_CONTROL = True: the night overventilation is window opening by the occupants, not a
+# fixed flow: on only when the room is warm (opens at 23 °C, closes below 22 °C), never when the
+# outdoor air is not cooler than the room, scaled 0 → 1 between 10 and 18 °C outdoor (RE2020
+# manual window management, Annex III §5.13). False: ACH_OVERVENT on every summer night.
+OVERVENT_CONTROL = False
 
 # ── Internal loads ────────────────────────────────────────────────────────────
+# INTERNAL_GAINS = "RE2020": conventional scenario of the RE2020 for a dwelling (heating.py):
+#   occupants : N_adeq equivalent adults from the floor area (1.28 for 25 m²), 90 W and
+#               0.055 kg/h each when awake at home, 70 % when asleep (22h-6h), 0 when away
+#               (weekdays 9h-17h, Wednesday 9h-13h, holiday week in December)
+#   equipment : 5.7 W/m² awake at home, 1.14 W/m² otherwise; lighting 1.4 W/m² awake at home
+#   The values below (N_OCCUPANTS ... LIGHTING_HOURS) are then ignored.
+# INTERNAL_GAINS = "SIMPLE": the values below.
+INTERNAL_GAINS  = "SIMPLE"
 N_OCCUPANTS     = 2.0
 Q_SENSIBLE      = 80.0       # [W/person]
 Q_LATENT        = 60.0       # [W/person]  (water vapour)
@@ -192,6 +206,9 @@ H_EXT, H_INT  = 25.0, 8.0  # surface heat transfer, convection + radiation [W/(m
 # radiation moves heat but no water vapour. EN ISO 6946 Annex: h_c,ext = 4 + 4·v (v = 4 m/s),
 # h_c,int = 2.5 W/(m²·K) for a vertical wall (horizontal heat flow).
 H_C_EXT, H_C_INT = 20.0, 2.5
+WALL_SUBSTEPS = 6          # wall sub-steps per hour (600 s): with one 1 h step the coefficients
+                           # frozen at the start of the step make a wet sunny exterior surface
+                           # oscillate by several K from one hour to the next
 MESH_OPT      = 2          # 2 = per-layer mesh: each layer in equal elements of ~MESH_SIZE,
                            #     at least 2 per layer (thin layers refined on their own)
                            # 0 = one element size for the whole wall (old behaviour)
@@ -408,14 +425,28 @@ if HEATING and MODE == "Th-D" and ZONE != "MACON":
 RE2020_ZONE = ZONE if ZONE != "MACON" else "H1c"       # Mâcon is assumed to be in zone H1c
 
 
+def internal_gains(start_doy, n_steps):
+    """Occupant, equipment and lighting configurations for n_steps hourly steps (INTERNAL_GAINS)."""
+    if INTERNAL_GAINS == "RE2020":
+        occ, equip, light = internal_gains_series(start_doy, n_steps)
+        latent_w = re_gains.MOIST_ADULT_KG_H * 2.5e6 / 3600.0     # 0.055 kg/h as latent power (Lv of sources.py)
+        return (OccupantConfig(n_adeq(FLOOR_AREA), re_gains.GAIN_ADULT_W, latent_w, occ.tolist()),
+                EquipmentConfig(re_gains.EQUIP_W_M2 * FLOOR_AREA, schedule=equip.tolist()),
+                LightingConfig(re_gains.LIGHT_W_M2, FLOOR_AREA, schedule=light.tolist()))
+    occ_sched   = build_daily_schedule(OCCUPANCY_HOURS, n_steps, int(DT))
+    light_sched = build_daily_schedule(LIGHTING_HOURS,  n_steps, int(DT))
+    return (OccupantConfig(N_OCCUPANTS, Q_SENSIBLE, Q_LATENT, occ_sched),
+            EquipmentConfig(EQUIPMENT_W, schedule=occ_sched),
+            LightingConfig(LIGHTING_W_M2, FLOOR_AREA, schedule=light_sched))
+
+
 def build_simulation(start_doy, n_steps, T_room0, RH_room0, evaluate=True, quiet=False):
     """
     Room simulation of n_steps hourly steps starting at 00:00 of day-of-year start_doy.
     Returns (simulation, heating controller or None, RE2020 evaluator or None).
     It is called twice: for the spin-up run and for the period itself.
     """
-    occ_sched   = build_daily_schedule(OCCUPANCY_HOURS, n_steps, int(DT))
-    light_sched = build_daily_schedule(LIGHTING_HOURS,  n_steps, int(DT))
+    occupants, equipment, lighting = internal_gains(start_doy, n_steps)
 
     # Ventilation: night overventilation only during the summer months
     ach_total   = ACH_BASE + ACH_OVERVENT
@@ -423,9 +454,13 @@ def build_simulation(start_doy, n_steps, T_room0, RH_room0, evaluate=True, quiet
     step        = np.arange(n_steps)
     step_month  = np.array([day_date(int(k), start_doy).month for k in step // 24])
     is_night    = np.isin(step % 24, NIGHT_HOURS)
-    vent_sched  = np.where(is_night & _is_summer(step_month), 1.0, base_ratio).tolist()
-    ventilation = VentilationConfig(n_ach=ach_total, hrv_efficiency=0.0,
-                                    moisture_recovery=0.0, schedule=vent_sched)
+    if OVERVENT_CONTROL:
+        ventilation = VentilationConfig(n_ach=ACH_BASE, overvent_ach=ACH_OVERVENT,
+                                        overvent_window=(is_night & _is_summer(step_month)).tolist())
+    else:
+        vent_sched  = np.where(is_night & _is_summer(step_month), 1.0, base_ratio).tolist()
+        ventilation = VentilationConfig(n_ach=ach_total, hrv_efficiency=0.0,
+                                        moisture_recovery=0.0, schedule=vent_sched)
 
     # Heating: RE2020 scenario and season (see heating.py); no heating = free-floating room
     hvac, ctrl = None, None
@@ -447,9 +482,9 @@ def build_simulation(start_doy, n_steps, T_room0, RH_room0, evaluate=True, quiet
         window_configs = WINDOWS,
         bridge_configs = THERMAL_BRIDGES,
         opening_configs= INFILTRATION,
-        occupants  = OccupantConfig(N_OCCUPANTS, Q_SENSIBLE, Q_LATENT, occ_sched),
-        equipment  = EquipmentConfig(EQUIPMENT_W, schedule=occ_sched),
-        lighting   = LightingConfig(LIGHTING_W_M2, FLOOR_AREA, schedule=light_sched),
+        occupants  = occupants,
+        equipment  = equipment,
+        lighting   = lighting,
         ventilation= ventilation,
         hvac       = hvac,
         solar_calc = SolarCalculator(wx.lat, wx.lon, start_doy=start_doy,
@@ -457,6 +492,7 @@ def build_simulation(start_doy, n_steps, T_room0, RH_room0, evaluate=True, quiet
                                      timezone_offset=1.0, weather=wx),
         volume        = VOLUME,
         internal_mass = INTERNAL_MASS,
+        wall_substeps = WALL_SUBSTEPS,
         T_room_init   = T_room0,
         RH_room_init  = RH_room0,
         re2020        = ev,
@@ -530,12 +566,26 @@ T_rm_h   = np.repeat(T_rm_day, S)
 # RE2020 occupancy scenario for dwellings (hourly, 1 = occupied)
 occ_h = occupancy_series(DOY_START, N)
 
-# Official RE2020 summer comfort (DH): adaptive comfort, occupied hours only.
+# Official RE2020 summer comfort (DH): occupied hours of the adaptive-comfort period, limit
+# min(max(26, 0.33·T_rm + 20.8), 28) from 6h to 22h and 26 °C during the sleep period (re2020.py).
 # The room air temperature stands in for the operative temperature.
+hour_h   = np.arange(N) % S
+adapt_h  = np.repeat(adaptive_period(rm_year)[(DOY_START - 1 + np.arange(n_days)) % len(rm_year)], S)
+T_lim_h  = hot_discomfort_limit(T_rm_h, hour_h, T_cool_set=26.0, category=1)
 if RE2020:
-    DH_hour  = adaptive_discomfort(T_room, T_rm_h, occ_h, T_cool_set=26.0, category=1)
-    re_ev.add_adaptive_discomfort_hours(T_room, T_rm_h, occ_h, T_cool_set=26.0, category=1, dt=int(DT))
+    DH_hour  = adaptive_discomfort(T_room, T_rm_h, occ_h, hour_h, adapt_h, T_cool_set=26.0, category=1)
+    re_ev.add_adaptive_discomfort_hours(T_room, T_rm_h, occ_h, hour_h, adapt_h, T_cool_set=26.0,
+                                        category=1, dt=int(DT))
     DH_total = float(DH_hour.sum())
+
+# Air-change rate of the step ending at each stored hour (row 0: the first step) [1/h]
+_ach    = np.array(sim.StockACH)
+ACH_h   = np.r_[_ach[:1], _ach][:N]
+
+# Internal gains actually applied over the period (sensible W, occupant vapour kg/h)
+_occ, _eq, _li = internal_gains(DOY_START, N)
+Q_int_h  = np.array([_occ.sensible_at(k) + _eq.heat_at(k) + _li.heat_at(k) for k in range(N)])
+G_int_h  = np.array([_occ.moisture_at(k) * 3600.0 for k in range(N)])
 
 # Comfort classification used by the comfort map
 month_day = np.array([day_date(k).month for k in range(n_days)])
@@ -543,7 +593,7 @@ summer_h  = np.repeat(_is_summer(month_day), S)
 if COMFORT_MAP == "RE2020":
     # RE2020 comfort zone: from the heating setpoint up to the adaptive limit (category 1),
     # evaluated over the occupied hours of the simulated period (like the DH indicator)
-    T_low, T_high = np.full(N, HEATING_SETPOINT), np.maximum(26.0, 0.33 * T_rm_h + 18.8 + 2.0)
+    T_low, T_high = np.full(N, HEATING_SETPOINT), T_lim_h
     ref_h         = occ_h
     COMFORT_LABEL = "RE2020 comfort (occupied hours)"
 else:
@@ -648,7 +698,7 @@ def plot_3d():
         ]
 
     fig = plt.figure(figsize=(13, 9))
-    ax = fig.add_axes([0.25, 0.0, 0.75, 0.93], projection="3d")   # keep the left column free for the legend
+    ax = fig.add_axes([0.05, 0.0, 0.90, 0.93], projection="3d")
     ax.set_facecolor("#F8F8F8")
 
     # South/North span the full width including the corners; East/West fill between them
@@ -712,13 +762,6 @@ def plot_3d():
     ax.plot([LX+tE+0.12]*2, [LY+tN+0.12]*2, [0, H], color="#555555", lw=1.2)
     ax.text(LX+tE+0.16, LY+tN+0.15, H/2, f"h = {H:g} m", ha="left", va="center",
             fontsize=9, color="#555555")
-
-    lines = ["Parois (ext → int)", "─" * 26]
-    for n in ORIENT:
-        lines.append(f"{WALL_FR[n]}   U = {wall_u_value(WALL_LAYERS[n]):.3f} W/(m²·K)")
-        lines += [f"   {m} {e*100:g} cm" for m, e in WALL_LAYERS[n]]
-    fig.text(0.01, 0.95, "\n".join(lines), fontsize=9, va="top", ha="left", family="monospace",
-             bbox=dict(boxstyle="round,pad=0.55", fc="#FFFDF0", ec="#C8A86A", alpha=0.95))
 
     ax.set_xlim(-tW-0.3, LX+tE+0.5); ax.set_ylim(-tS-0.3, LY+tN+0.8); ax.set_zlim(0, H+0.35)
     ax.set_xticks([]); ax.set_yticks([]); ax.set_zticks([]); ax.grid(False)
@@ -884,11 +927,12 @@ def plot_comfort_re2020():
     print("  Plotting: comfort_map (RE2020) ...")
     fig, ax = plt.subplots(figsize=(10, 8), constrained_layout=True)
     x = np.linspace(T_rm_h.min() - 1, T_rm_h.max() + 1, 200)
-    upper = np.maximum(26.0, 0.33 * x + 18.8 + 2.0)
+    upper = hot_discomfort_limit(x, np.full(len(x), 12))
     ax.fill_between(x, HEATING_SETPOINT, upper, color="#B8E0B0", alpha=0.55,
                     label="Zone de confort RE2020")
     ax.plot(x, upper, color="#CC3030", lw=1.8,
-            label="Limite haute (cat. 1) : max(26 ; 0,33·T_rm + 20,8)")
+            label="Limite haute 6h-22h : min(max(26 ; 0,33·T_rm + 20,8) ; 28)")
+    ax.axhline(26.0, color="#CC3030", lw=1.4, ls="--", label="Limite haute 22h-6h (sommeil) : 26 °C")
     ax.axhline(HEATING_SETPOINT, color="#1F5F99", lw=1.6,
                label=f"Limite basse = consigne de chauffage {HEATING_SETPOINT:g} °C")
     ax.scatter(T_rm_h[~occ_h], T_room[~occ_h], c="#999999", s=3, alpha=0.10,
@@ -1160,12 +1204,23 @@ summary = {
     "spinup_days": SPINUP_DAYS,
     "heating_season": HEATING_SEASON if HEATING else None,
 }
-# hourly series (for comparing runs or plotting elsewhere)
+# hourly series (for comparing runs or plotting elsewhere); row k = state at hour k of the period
 np.savetxt(os.path.join(OUT_DIR, "series.csv"),
            np.column_stack([np.arange(N) // S, np.arange(N) % S, T_out, RH_out, T_room, RH_room,
-                            Q_heat if HEATING else np.zeros(N), Q_lat, occ_h.astype(int)]),
+                            Q_heat if HEATING else np.zeros(N), Q_lat, occ_h.astype(int),
+                            T_rm_h, DH_hour, T_lim_h, adapt_h.astype(int), Q_int_h, G_int_h, ACH_h]),
            delimiter=",", fmt="%.4f", comments="",
-           header="day,hour,T_out,RH_out,T_room,RH_room,Q_heat_W,Q_lat_W,occupied")
+           header="day,hour,T_out,RH_out,T_room,RH_room,Q_heat_W,Q_lat_W,occupied,T_rm,DH_h,"
+                  "T_lim,adaptive_period,Q_int_W,G_int_kg_h,ACH")
+# temperature and RH at every node of every wall, every hour (same row index as series.csv)
+np.savez_compressed(
+    os.path.join(OUT_DIR, "wall_fields.npz"), walls=np.array(list(ORIENT)),
+    **{f"{n}_{key}": arr for n, w in zip(ORIENT, sim.walls) for key, arr in (
+        ("T",      (np.array(w.StockT)[:N, :, 0] - 273.15).astype(np.float32)),
+        ("RH",     np.array(w.StockRH)[:N, :, 0].astype(np.float32)),
+        ("x",      w.layer.x_pos),
+        ("bounds", w.layer.layer_bounds),
+        ("mat",    np.array(w.layer.mat)))})
 with open(os.path.join(OUT_DIR, "summary.json"), "w", encoding="utf-8") as f:
     json.dump(summary, f, indent=2, ensure_ascii=False)
 

@@ -74,6 +74,22 @@ SCENARIOS = {
         "note": "classic thermal model: walls closed to vapour on both faces (no moisture at all)",
     },
 
+    # ── Poster (GdR MBGS, Pornichet 2026): one regulatory case, no variants ──────────
+    # Hempcrete walls (an earth version will follow), roof thermal only (vapour-tight),
+    # no windows, RE2020 Th-D climate H1c over a full year with the RE2020 heating scenario and
+    # the RE2020 internal gains (1.28 equivalent adults for 25 m², see heating.py),
+    # hygiene ventilation = minimum total exhaust flow of the arrêté du 24 mars 1982 for a
+    # one-main-room dwelling, 35 m³/h, i.e. 35 / 62.5 m³ = 0.56 1/h, constant, no night overventilation.
+    "poster_hemp": {
+        "ZONE": "H1c", "MODE": "Th-D", "START_DATE": "01/01", "END_DATE": "01/01",
+        "SPINUP_DAYS": 730, "HEATING": True, "HEATING_SEASON": "RE2020",
+        "WALL_STACK": [("Hempcrete", 0.30)], "WALL_INTERIOR_SD": {}, "HYGRO_EFFECT": True,
+        "ROOF": True, "ROOF_HYGRO": False, "WINDOWS": [], "THERMAL_BRIDGES": [],
+        "ACH_BASE": 35.0 / 62.5, "ACH_OVERVENT": 0.0, "INTERNAL_GAINS": "RE2020",
+        "note": "poster: hempcrete 30 cm, vapour-tight roof, RE2020 Th-D H1c, RE2020 internal gains, "
+                "35 m3/h hygiene ventilation",
+    },
+
     # ── Use cases (climate, period, heating, spin-up) ─────────────────────────
     "typical_heated": {
         "MODE": "Th-BC", "START_DATE": "01/01", "END_DATE": "01/01", "SPINUP_DAYS": 730,
@@ -93,6 +109,7 @@ SCENARIOS = {
     "ach_low":   {"ACH_BASE": 0.3, "note": "hygiene ventilation 0.3 1/h (base 0.5)"},
     "ach_high":  {"ACH_BASE": 1.0, "note": "hygiene ventilation 1.0 1/h (base 0.5)"},
     "overvent_none":   {"ACH_OVERVENT": 0.0, "note": "no night overventilation: constant ACH_BASE"},
+    "overvent_base":   {"ACH_OVERVENT": 4.0, "note": "4 1/h added on summer nights (value of section 1)"},
     "overvent_strong": {"ACH_OVERVENT": 8.0, "note": "8 1/h added on summer nights (base 4)"},
 
     # ── Spin-up length ────────────────────────────────────────────────────────
@@ -103,3 +120,14 @@ SCENARIOS = {
     "zone_h1a": {"ZONE": "H1a", "note": "climate zone H1a"},
     "zone_h3":  {"ZONE": "H3",  "note": "climate zone H3"},
 }
+
+# Poster, ventilated cases: the same room with night window opening by the occupants (22h-8h,
+# May-September), controlled as in the RE2020 manual window management: open when the room
+# reaches 23 °C, closed below 22 °C, only when the outdoor air is cooler than the room, scaled
+# 0 → 1 between 10 and 18 °C outdoor. Two opening rates: up to 2 and up to 4 extra air changes.
+for _name, _ach in (("poster_hemp_vent2", 2.0), ("poster_hemp_vent", 4.0)):
+    SCENARIOS[_name] = {
+        **SCENARIOS["poster_hemp"], "ACH_OVERVENT": _ach, "OVERVENT_CONTROL": True,
+        "note": f"poster: as poster_hemp + controlled night window opening, up to {_ach:g} 1/h "
+                "(22h-8h, May-September)",
+    }
