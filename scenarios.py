@@ -83,7 +83,7 @@ SCENARIOS = {
     "poster_hemp": {
         "ZONE": "H1c", "MODE": "Th-D", "START_DATE": "01/01", "END_DATE": "01/01",
         "SPINUP_DAYS": 730, "HEATING": True, "HEATING_SEASON": "RE2020",
-        "WALL_STACK": [("Hempcrete", 0.30)], "WALL_INTERIOR_SD": {}, "HYGRO_EFFECT": True,
+        "WALL_STACK": [("Hempcrete_legacy", 0.30)], "WALL_INTERIOR_SD": {}, "HYGRO_EFFECT": True,
         "ROOF": True, "ROOF_HYGRO": False, "WINDOWS": [], "THERMAL_BRIDGES": [],
         "ACH_BASE": 35.0 / 62.5, "ACH_OVERVENT": 0.0, "INTERNAL_GAINS": "RE2020",
         "note": "poster: hempcrete 30 cm, vapour-tight roof, RE2020 Th-D H1c, RE2020 internal gains, "
@@ -119,6 +119,19 @@ SCENARIOS = {
     # ── Climate ───────────────────────────────────────────────────────────────
     "zone_h1a": {"ZONE": "H1a", "note": "climate zone H1a"},
     "zone_h3":  {"ZONE": "H3",  "note": "climate zone H3"},
+
+    # ── Physics switches (combine with any case, e.g. "poster_hemp+dry") ─────────
+    "dry":         {"HYGRO_EFFECT": False,
+                    "note": "dry walls: heat conduction only, dry heat capacity (comparison with DTS)"},
+    "comfort_air": {"COMFORT_TEMP": "air", "note": "comfort indicators with the air temperature"},
+
+    # ── Sourced materials (materials_library.py PARAMS) — combine with a case, e.g. "poster_hemp+hemp_sourced"
+    "hemp_sourced":  {"WALL_STACK": [("Hempcrete", 0.30)],
+                      "note": "hemp concrete 30 cm, sourced properties (Moujalled 2018), lambda(w)"},
+    "earth_sourced": {"WALL_STACK": [("Rammed_Earth", 0.30)],
+                      "note": "rammed earth 30 cm, sourced properties (Chabriac/Soudani 2016, Bui 2025), lambda(w)"},
+    "iso_mean":      {"MATERIAL_PARAMS": {"Hempcrete": {"iso_branch": "mean"}},
+                      "note": "hemp concrete isotherm: mean of the adsorption and desorption curves"},
 }
 
 # Poster, ventilated cases: the same room with night window opening by the occupants (22h-8h,

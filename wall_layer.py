@@ -25,7 +25,7 @@ Adding a new material
 import numpy as np
 import library as lib
 from materials_library import (
-    Rammed_Earth, Hempcrete,
+    Rammed_Earth, Hempcrete, Rammed_Earth_legacy, Hempcrete_legacy,
     Rock_Wool, Wood_Fiber, Concrete, Wood,
     Vapor_Barrier, Rain_Barrier, Earth_Plaster, Gypsum_Plaster,
     Lime_Plaster, Fermacell, BA13,
@@ -36,6 +36,8 @@ from materials_library import (
 _MAT_REGISTRY = {
     "Rammed_Earth":   Rammed_Earth,
     "Hempcrete":      Hempcrete,
+    "Rammed_Earth_legacy": Rammed_Earth_legacy,
+    "Hempcrete_legacy":    Hempcrete_legacy,
     "Lime_Plaster":   Lime_Plaster,
     "Fermacell":      Fermacell,
     "BA13":           BA13,
@@ -58,6 +60,39 @@ def register_material(name, cls):
 def available_materials():
     """Return the list of registered material names."""
     return list(_MAT_REGISTRY.keys())
+
+
+def apply_material_params(overrides):
+    """
+    Set the property values of materials that carry PARAMS (Hempcrete, Rammed_Earth).
+
+    overrides : {material: {parameter: value}}, value = a number (or text for text parameters),
+                "nominal", "min" or "max". Example: {"Hempcrete": {"k_dry": "max", "iso_branch": "mean"}}
+    Every material with PARAMS is first reset to its nominal values. A numeric value outside the
+    [min, max] range of the literature is accepted with a warning.
+    Returns {material: {parameter: value in force}} for every material with PARAMS.
+    """
+    for cls in _MAT_REGISTRY.values():
+        if hasattr(cls, "PARAMS"):
+            cls.p = {k: v[0] for k, v in cls.PARAMS.items()}
+    for name, params in (overrides or {}).items():
+        if name not in _MAT_REGISTRY or not hasattr(_MAT_REGISTRY[name], "PARAMS"):
+            raise ValueError(f"MATERIAL_PARAMS: '{name}' has no PARAMS table "
+                             f"(materials with ranges: {[n for n, c in _MAT_REGISTRY.items() if hasattr(c, 'PARAMS')]})")
+        cls = _MAT_REGISTRY[name]
+        for key, val in params.items():
+            if key not in cls.PARAMS:
+                raise ValueError(f"MATERIAL_PARAMS: unknown parameter '{key}' for {name}. "
+                                 f"Available: {list(cls.PARAMS)}")
+            nominal, lo, hi, _src = cls.PARAMS[key]
+            if isinstance(val, str) and val in ("nominal", "min", "max"):
+                val = {"nominal": nominal, "min": lo, "max": hi}[val]
+                if val is None:
+                    raise ValueError(f"MATERIAL_PARAMS: {name}.{key} has no range in the literature table")
+            elif isinstance(val, (int, float)) and lo is not None and not (lo <= val <= hi):
+                print(f"  [!] {name}.{key} = {val} is outside the literature range [{lo}, {hi}]")
+            cls.p[key] = val
+    return {n: dict(c.p) for n, c in _MAT_REGISTRY.items() if hasattr(c, "PARAMS")}
 
 
 # ── WallLayer class ────────────────────────────────────────────────────────────
@@ -229,15 +264,21 @@ class WallLayer:
     def delta_l(self, T, RH):  return self._fill("delta_l", T, RH)
     def Dw(self, T, RH):       return self._fill("Dw",      T, RH)
 
-    def Xi_Pc(self, T, RH):
-        return (
-            lib.partial_derivative(self.w, T, RH, var="y")
-            * np.exp(-lib.Pc(T, RH) / (lib.rhoL * lib.Rv * T))
-            / (-lib.rhoL * lib.Rv * T)
-        )
+    def Xi_RH(self, T, RH, h=1e-5):
+        """dw/dRH per node: analytical when the material provides dw_dRH, else central difference."""
+        out = np.zeros([self.N_tot, 1])
+        for i in range(self.Nb_layer):
+            s, e = int(self.N_sum[i, 0]), int(self.N_sum[i + 1, 0])
+            mat = _MAT_REGISTRY[self.mat[i]]
+            if hasattr(mat, "dw_dRH"):
+                out[s:e] = mat.dw_dRH(T[s:e], RH[s:e])
+            else:
+                out[s:e] = (mat.w(T[s:e], RH[s:e] + h) - mat.w(T[s:e], RH[s:e] - h)) / (2 * h)
+        return out
 
-    def Xi_RH(self, T, RH):
-        return lib.partial_derivative(self.w, T, RH, var="y")
+    def Xi_Pc(self, T, RH):
+        """dw/dPc = dw/dRH · dRH/dPc, with dRH/dPc = -RH/(rhoL·Rv·T) (Kelvin)."""
+        return self.Xi_RH(T, RH) * (-RH / (lib.rhoL * lib.Rv * T))
 
     # ── Convenience ────────────────────────────────────────────────────────────
 

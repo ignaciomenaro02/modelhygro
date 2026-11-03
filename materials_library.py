@@ -18,8 +18,17 @@ Each class exposes static methods:
 
 Sources
 -------
-- Rammed_Earth  : Chabriac (2014), Saint-Antoine l'Abbaye
-- Hempcrete     : Literature composite values
+- Rammed_Earth  : Chabriac (2014), Saint-Antoine l'Abbaye, via Soudani et al. (2016) and
+                  Bui et al. (2025): nominal values and ranges in Rammed_Earth.PARAMS
+- Hempcrete     : Moujalled et al. (2018), ranges from the literature in Hempcrete.PARAMS
+- *_legacy      : the two materials as used until October 2026 (poster runs)
+
+Parameter ranges
+----------------
+Hempcrete and Rammed_Earth carry PARAMS = {name: (nominal, min, max, source)} and read the values in
+force from the class dict `p` (nominal by default). Change them with
+wall_layer.apply_material_params({"Hempcrete": {"k_dry": "max", "delta_p": 2e-11}}), which is what
+simulation.py does with its MATERIAL_PARAMS setting.
 - Rock_Wool     : ISO 10456 / HAMSTAD benchmark
 - Wood_Fiber    : Kaemmerlen (2010), IEA Annex 55
 - Concrete      : EN ISO 10456, Künzel (1995)
@@ -52,12 +61,177 @@ def _Dw_capillary(Avalue, wf, w):
     return 3.8 * (Avalue / max(wf, 1e-6))**2 * 1000**(ratio - 1)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ── Sorption isotherm models: w or u as a function of RH, with their analytical slopes ──────────
+def gab(phi, wm, C, K):
+    """GAB isotherm, w [kg/m³] (wm in kg/m³)."""
+    x = K * phi
+    return wm * C * x / ((1 - x) * (1 + (C - 1) * x))
+
+
+def dgab_dphi(phi, wm, C, K):
+    """dw/dRH of the GAB isotherm [kg/m³]."""
+    x = K * phi
+    return K * wm * C * (1 + (C - 1) * x**2) / ((1 - x)**2 * (1 + (C - 1) * x)**2)
+
+
+T_ISO = 296.15                              # reference temperature of the isotherms [K] (23 °C)
+_H_PER_LN = lib.R * T_ISO / (lib.Mw * 9.81)  # capillary head per unit -ln(RH) [m]
+
+
+def vg_head(phi, usat, alpha, eta):
+    """van Genuchten in capillary head (Moujalled et al. 2018, Eq. 5), u [kg/kg]:
+    u = usat·[1 + (alpha·h)^eta]^(1/eta - 1),  h = -R·T_ref/(M·g)·ln(RH) [m].
+    Written at the reference temperature, so that w does not depend on T (dw/dT = 0 in the model)."""
+    h = -_H_PER_LN * np.log(np.clip(phi, 1e-9, 1.0))
+    return usat * (1 + (alpha * h)**eta)**(1 / eta - 1)
+
+
+def dvg_head_dphi(phi, usat, alpha, eta):
+    """du/dRH of vg_head [kg/kg]."""
+    phi = np.clip(phi, 1e-9, 1.0)
+    ah = alpha * _H_PER_LN * (-np.log(phi))
+    du_dh = usat * (1 / eta - 1) * (1 + ah**eta)**(1 / eta - 2) * eta * ah**(eta - 1) * alpha
+    return du_dh * (-_H_PER_LN / phi)
+
+
+def _p(cls):
+    """Values in force of a material with PARAMS (nominal by default)."""
+    return cls.p
+
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Bio- and geo-sourced materials of the thesis (sourced values and ranges)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class Hempcrete:
+    """
+    Hemp-lime concrete (~450 kg/m³). Nominal values: Moujalled et al. (2018), Building and
+    Environment 136, Tables 2-3 (same material as Aït Ouméziane et al. 2016), except the dry thermal
+    conductivity: 0.073 W/(m·K), declared value of the Saint-Astier BATICHANVRE data sheet (Dec. 2023)
+    for walls (350-450 kg/m³). Ranges:
+    Aït Ouméziane et al. (2016) CBM 106; Benkhaled et al. (2022) ICHMT 132, Table 1;
+    Bennai et al. (2022) CBM 316; Colinart et al. (sprayed hemp concrete).
+    Thermal conductivity linear in the mass water content (Moujalled 2018):
+        k = k_dry + (k_sat - k_dry)·u/u_sat
+    Isotherm: van Genuchten in capillary head, main adsorption or desorption curve (no hysteresis
+    model): iso_branch = "ads" | "des" | "mean".
+    """
+    PARAMS = {
+        #  name           nominal   min       max       source
+        "rho":          (450.0,   300.0,    550.0,    "Moujalled 2018 | range Aït Ouméziane 2016, Benkhaled 2022"),
+        "cp":           (1250.0,  1000.0,   1500.0,   "Moujalled 2018 | range Benkhaled 2022"),
+        "k_dry":        (0.073,   0.060,    0.150,    "Saint-Astier BATICHANVRE data sheet, Dec. 2023 (walls, "
+                                                      "350-450 kg/m³) | range Benkhaled 2022; 0.117 in Moujalled 2018"),
+        "k_sat":        (0.60,    None,     None,     "Moujalled 2018 (conductivity at u_sat)"),
+        "delta_p":      (5.0e-11, 1.13e-11, 1.0e-10,  "Moujalled 2018 | Bennai 2022 dry cup; Aït Ouméziane 2016"),
+        "u_sat":        (1.5,     None,     None,     "Moujalled 2018 [kg/kg]"),
+        "vg_alpha_ads": (0.0119,  None,     None,     "Moujalled 2018 [1/m]"),
+        "vg_eta_ads":   (2.0462,  None,     None,     "Moujalled 2018"),
+        "vg_alpha_des": (0.0185,  None,     None,     "Moujalled 2018 [1/m]"),
+        "vg_eta_des":   (1.647,   None,     None,     "Moujalled 2018"),
+        "iso_branch":   ("ads",   None,     None,     "ads | des | mean (hysteresis not modelled)"),
+        "iso_scale":    (1.0,     0.75,     1.25,     "±25 % on w, as Bui et al. 2025"),
+    }
+    p = {k: v[0] for k, v in PARAMS.items()}
+
+    def _u(RH):
+        q = _p(Hempcrete)
+        ads = vg_head(RH, q["u_sat"], q["vg_alpha_ads"], q["vg_eta_ads"])
+        if q["iso_branch"] == "ads":
+            return ads
+        des = vg_head(RH, q["u_sat"], q["vg_alpha_des"], q["vg_eta_des"])
+        return des if q["iso_branch"] == "des" else 0.5 * (ads + des)
+
+    def _du(RH):
+        q = _p(Hempcrete)
+        ads = dvg_head_dphi(RH, q["u_sat"], q["vg_alpha_ads"], q["vg_eta_ads"])
+        if q["iso_branch"] == "ads":
+            return ads
+        des = dvg_head_dphi(RH, q["u_sat"], q["vg_alpha_des"], q["vg_eta_des"])
+        return des if q["iso_branch"] == "des" else 0.5 * (ads + des)
+
+    def rho(T, RH):   return _p(Hempcrete)["rho"] + 0.0 * RH
+    def Cp(T, RH):    return _p(Hempcrete)["cp"] + 0.0 * RH
+
+    def k(T, RH):
+        q = _p(Hempcrete)
+        u = q["iso_scale"] * Hempcrete._u(RH)                 # mass water content [kg/kg]
+        return q["k_dry"] + (q["k_sat"] - q["k_dry"]) * u / q["u_sat"]
+
+    def w(T, RH):      return _p(Hempcrete)["iso_scale"] * _p(Hempcrete)["rho"] * Hempcrete._u(RH)
+    def dw_dRH(T, RH): return _p(Hempcrete)["iso_scale"] * _p(Hempcrete)["rho"] * Hempcrete._du(RH)
+
+    def delta_p(T, RH): return _p(Hempcrete)["delta_p"] + 0.0 * RH
+    def mu(T, RH):      return lib.Da(T) / Hempcrete.delta_p(T, RH)
+    def Avalue(T, RH):  return 0.05
+    def wf(T, RH):      return _p(Hempcrete)["u_sat"] * _p(Hempcrete)["rho"]
+
+    def Dw(T, RH):
+        return _Dw_capillary(Hempcrete.Avalue(T, RH), Hempcrete.wf(T, RH), Hempcrete.w(T, RH))
+
+    def delta_l(T, RH):  return 0.0 * RH
+
 
 class Rammed_Earth:
-    """Rammed earth — Saint-Antoine l'Abbaye (Chabriac 2014)."""
+    """
+    Rammed earth of Saint-Antoine-l'Abbaye (Chabriac 2014). Measured data: Soudani et al. (2016),
+    Energy and Buildings 116, Tables 1-2; ranges: Bui et al. (2025), J. Build. Perform. Simul., Table 1.
+    Thermal conductivity linear in the volumetric water content (Bui et al. 2025, Eq. 16):
+        k = k_dry + k_slope·θ,   θ = w/ρ_l
+    Isotherm: GAB fitted (least squares, all 8 points) to Chabriac's adsorption isotherm at 20 °C
+    (Soudani et al. 2016, Table 2), as done by Bui et al. (2025). Liquid transport neglected
+    (RH < 85 %, Bui et al. 2025).
+    """
+    PARAMS = {
+        #  name        nominal   min      max      source
+        "rho":       (1730.0,  1690.0,  1770.0,  "Soudani 2016 (1730 ± 40)"),
+        "cp":        (625.0,   580.0,   670.0,   "Bui et al. 2025 (Chabriac data)"),
+        "k_dry":     (0.77,    0.64,    0.90,    "Bui et al. 2025"),
+        "k_slope":   (5.06,    4.05,    6.07,    "Bui et al. 2025 [W/(m·K) per unit θ]"),
+        "mu":        (10.0,    9.4,     10.6,    "Bui et al. 2025 | 5-13 in Earth review, Sustainability 2019"),
+        "gab_wm":    (5.114,   None,    None,    "GAB fit to Soudani 2016 Table 2 [kg/m³]"),
+        "gab_C":     (17.957,  None,    None,    "GAB fit to Soudani 2016 Table 2"),
+        "gab_K":     (0.9804,  None,    None,    "GAB fit to Soudani 2016 Table 2"),
+        "iso_scale": (1.0,     0.75,    1.25,    "Bui et al. 2025: up to ±25 % on w"),
+        "A":         (0.39,    None,    None,    "Soudani 2016 [kg/(m²·s^0.5)]"),
+        "wf":        (259.0,   None,    None,    "Soudani 2016 [kg/m³]"),
+    }
+    p = {k: v[0] for k, v in PARAMS.items()}
+
+    def rho(T, RH):   return _p(Rammed_Earth)["rho"] + 0.0 * RH
+    def Cp(T, RH):    return _p(Rammed_Earth)["cp"] + 0.0 * RH
+
+    def k(T, RH):
+        q = _p(Rammed_Earth)
+        return q["k_dry"] + q["k_slope"] * Rammed_Earth.w(T, RH) / lib.rhoL
+
+    def w(T, RH):
+        q = _p(Rammed_Earth)
+        return q["iso_scale"] * gab(np.clip(RH, 0.0, 1.0), q["gab_wm"], q["gab_C"], q["gab_K"])
+
+    def dw_dRH(T, RH):
+        q = _p(Rammed_Earth)
+        return q["iso_scale"] * dgab_dphi(np.clip(RH, 0.0, 1.0), q["gab_wm"], q["gab_C"], q["gab_K"])
+
+    def mu(T, RH):       return _p(Rammed_Earth)["mu"] + 0.0 * RH
+    def delta_p(T, RH):  return lib.Da(T) / Rammed_Earth.mu(T, RH)
+    def Avalue(T, RH):   return _p(Rammed_Earth)["A"]
+    def wf(T, RH):       return _p(Rammed_Earth)["wf"]
+
+    def Dw(T, RH):
+        return _Dw_capillary(Rammed_Earth.Avalue(T, RH), Rammed_Earth.wf(T, RH), Rammed_Earth.w(T, RH))
+
+    def delta_l(T, RH):  return 0.0 * RH
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Legacy versions (poster runs, October 2026)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class Rammed_Earth_legacy:
+    """Rammed earth as used until October 2026: lambda = 1.15 constant (above the dry range
+    0.64-0.90 of Bui et al. 2025) and a 7-point isotherm in which the 76 % value of Chabriac (1.3 %)
+    was placed at 86 %. Kept to reproduce those runs."""
 
     def rho(T, RH):   return 1730
     def Cp(T, RH):    return 648
@@ -65,24 +239,25 @@ class Rammed_Earth:
 
     def w(T, RH):
         RH_t = np.array([0, 0.23, 0.43, 0.59, 0.86, 0.97, 1.0])
-        w_t  = Rammed_Earth.rho(T, RH) * np.array([0, 0.003, 0.005, 0.007, 0.013, 0.061, 0.195])
+        w_t  = Rammed_Earth_legacy.rho(T, RH) * np.array([0, 0.003, 0.005, 0.007, 0.013, 0.061, 0.195])
         return np.interp(RH, RH_t, w_t)
 
     def mu(T, RH):       return 10
-    def delta_p(T, RH):  return lib.Da(T) / Rammed_Earth.mu(T, RH)
+    def delta_p(T, RH):  return lib.Da(T) / Rammed_Earth_legacy.mu(T, RH)
     def Avalue(T, RH):   return 0.39
     def wf(T, RH):       return 337.35
 
     def Dw(T, RH):
-        return _Dw_capillary(Rammed_Earth.Avalue(T, RH),
-                             Rammed_Earth.wf(T, RH),
-                             Rammed_Earth.w(T, RH))
+        return _Dw_capillary(Rammed_Earth_legacy.Avalue(T, RH),
+                             Rammed_Earth_legacy.wf(T, RH),
+                             Rammed_Earth_legacy.w(T, RH))
 
     def delta_l(T, RH):  return 0.0
 
 
-class Hempcrete:
-    """Hempcrete — composite literature values."""
+class Hempcrete_legacy:
+    """Hempcrete as used until October 2026 (poster runs): composite literature values,
+    lambda = 0.076 constant, 7-point linear isotherm without source. Kept to reproduce those runs."""
 
     def rho(T, RH):   return 450
     def Cp(T, RH):    return 1500
@@ -90,18 +265,18 @@ class Hempcrete:
 
     def w(T, RH):
         RH_t = np.array([0, 0.23, 0.43, 0.59, 0.86, 0.97, 1.0])
-        w_t  = Hempcrete.rho(T, RH) * np.array([0, 0.010, 0.025, 0.045, 0.100, 0.200, 0.350])
+        w_t  = Hempcrete_legacy.rho(T, RH) * np.array([0, 0.010, 0.025, 0.045, 0.100, 0.200, 0.350])
         return np.interp(RH, RH_t, w_t)
 
     def mu(T, RH):       return 5
-    def delta_p(T, RH):  return lib.Da(T) / Hempcrete.mu(T, RH)
+    def delta_p(T, RH):  return lib.Da(T) / Hempcrete_legacy.mu(T, RH)
     def Avalue(T, RH):   return 0.05
     def wf(T, RH):       return 80.0
 
     def Dw(T, RH):
-        return _Dw_capillary(Hempcrete.Avalue(T, RH),
-                             Hempcrete.wf(T, RH),
-                             Hempcrete.w(T, RH))
+        return _Dw_capillary(Hempcrete_legacy.Avalue(T, RH),
+                             Hempcrete_legacy.wf(T, RH),
+                             Hempcrete_legacy.w(T, RH))
 
     def delta_l(T, RH):  return 0.0
 

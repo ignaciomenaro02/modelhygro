@@ -137,6 +137,7 @@ class RoomSimulation:
                 hm_int  = cfg.hm_int,
                 T_init  = T_room_init + 273.15,
                 RH_init = RH_room_init,
+                hygro   = getattr(cfg, "hygro", True),
             )
             self.layers.append(layer)
             self.walls.append(wall)

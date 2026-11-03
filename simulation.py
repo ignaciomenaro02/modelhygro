@@ -51,7 +51,7 @@ except Exception:
 
 import library       as lib
 from wall_config     import make_wall, WindowConfig, ThermalBridge, OpeningConfig
-from wall_layer      import _MAT_REGISTRY
+from wall_layer      import _MAT_REGISTRY, apply_material_params
 from sources         import (OccupantConfig, EquipmentConfig, LightingConfig,
                              VentilationConfig, HVACConfig, build_daily_schedule)
 from solar           import SolarCalculator
@@ -101,6 +101,12 @@ H  = 2.5            # ceiling height
 #   WALL_STACK = [("Wood_Fiber", 0.10), ("Rammed_Earth", 0.30)]      # exterior insulation + earth
 WALL_STACK = [("Hempcrete", 0.30)]
 #WALL_STACK1 = [("Rammed_Earth", 0.30), ("Earth_Plaster", 0.02), ("Vapor_Barrier", 0.002)]
+
+# Material properties: Hempcrete and Rammed_Earth carry sourced nominal values and literature ranges
+# (materials_library.py, PARAMS). Override them here or in a scenario: a number, "min", "max" or
+# "nominal". E.g. {"Hempcrete": {"k_dry": "max", "iso_branch": "mean"}, "Rammed_Earth": {"mu": "min"}}.
+# "Hempcrete_legacy" / "Rammed_Earth_legacy" = the materials of the poster runs (October 2026).
+MATERIAL_PARAMS = {}
 
 # Keys: South, North, East, West. Give a wall its own list to make it different.
 WALL_LAYERS = {"South": WALL_STACK, "North": WALL_STACK, "East": WALL_STACK, "West": WALL_STACK}
@@ -191,7 +197,15 @@ HEATING_SEASON     = "RE2020"
 RE2020 = True
 
 # ── Physics and numerics (normally left alone) ────────────────────────────────
-HYGRO_EFFECT  = True       # False = walls impermeable to vapour (heat only)
+HYGRO_EFFECT  = True       # False = dry walls, heat conduction only (as in dynamic thermal simulation):
+                           # no vapour exchange at the surfaces, no vapour/latent terms in the wall
+                           # energy balance, dry heat capacity ρ·cp (no water)
+# Temperature used for the comfort indicators (DH, comfort map, cold discomfort):
+#   "operative" = (air + mean radiant)/2, the RE2020 and Pléiades/COMFIE convention
+#   "air"       = room air temperature (previous behaviour)
+# Mean radiant temperature = area-weighted interior surface temperatures of the walls (and roof);
+# surfaces that are not modelled (adiabatic floor, ceiling if ROOF = False) are taken at air temperature.
+COMFORT_TEMP  = "operative"
 
 # Interior coating / vapour film of a wall, as a resistance at the INTERIOR surface:
 # equivalent air-layer thickness Sd [m] (wall name → Sd; missing or 0 = bare surface).
@@ -294,6 +308,7 @@ def day_date(k, start_doy=None):
     first = DOY_START if start_doy is None else start_doy
     return date(2001, 1, 1) + timedelta(days=(first - 1 + k) % 365)
 
+MATERIALS_IN_FORCE = apply_material_params(MATERIAL_PARAMS)   # property values used by this run
 FLOOR_AREA    = LX * LY
 VOLUME        = LX * LY * H
 INTERNAL_MASS = 110e3 * FLOOR_AREA          # [J/K] ISO 13790, medium inertia
@@ -397,7 +412,7 @@ def create_walls(quiet=False):
             hm_int = hm_ext = 1e-30             # thermal only: no vapour exchange on either face
         walls.append(make_wall(name, area=area, orientation=ori, layers=layers, tilt=tilt,
                                Mesh_Opt=MESH_OPT, mesh_size=mesh, h_ext=H_EXT, hm_ext=hm_ext,
-                               h_int=H_INT, hm_int=hm_int))
+                               h_int=H_INT, hm_int=hm_int, hygro=HYGRO_EFFECT))
     return walls
 
 
@@ -548,16 +563,26 @@ RH_out  = np.interp(np.arange(len(T_run)) * DT, time_bc, RH_ext_bc)[:N] * 100
 def daily(x, f):
     return np.array([f(x[k*S:(k+1)*S]) for k in range(n_days)])
 
+# Interior surface temperatures, mean radiant and operative temperature [°C]
+WALL_NAMES = [cfg.name for cfg in sim.wall_configs]
+WALL_AREA  = np.array([cfg.area for cfg in sim.wall_configs])
+T_si       = np.column_stack([np.array(sim.StockT_walls[n])[:N] for n in WALL_NAMES])
+A_air      = FLOOR_AREA * (1 if ROOF else 2)          # unmodelled surfaces (floor, ceiling) at air temperature
+T_mrt      = (T_si @ WALL_AREA + A_air * T_room) / (WALL_AREA.sum() + A_air)
+T_op       = 0.5 * (T_room + T_mrt)
+T_comf     = T_op if COMFORT_TEMP == "operative" else T_room
+COMF_FR    = "opérative" if COMFORT_TEMP == "operative" else "de l'air"
+
 T_out_max = daily(T_out, np.max)
 T_out_min = daily(T_out, np.min)
 HOTTEST   = int(np.argmax(T_out_max))              # hottest day (index)
 COLDEST   = int(np.argmin(T_out_min))              # coldest day (index)
 fmt_date  = lambda k: day_date(k).strftime("%d %B").lstrip("0")
 
-DH_hour  = np.maximum(T_room - 28.0, 0.0)                       # simplified DH: fixed 28 °C, all hours
+DH_hour  = np.maximum(T_comf - 28.0, 0.0)                       # simplified DH: fixed 28 °C, all hours
 DH_28    = float(DH_hour.sum())                                 # [°C·h]
 DH_total = DH_28                                                # replaced by the official DH below when RE2020 is on
-DJ_total = float(np.maximum(18.0 - T_room, 0.0).sum() / 24.0)   # [°C·d] below 18 °C
+DJ_total = float(np.maximum(18.0 - T_comf, 0.0).sum() / 24.0)   # [°C·d] room below 18 °C (cold discomfort)
 
 # T_rm for the simulated days (rm_year is computed in section 5)
 T_rm_day = np.array([rm_year[(DOY_START - 1 + k) % len(rm_year)] for k in range(n_days)])
@@ -568,13 +593,13 @@ occ_h = occupancy_series(DOY_START, N)
 
 # Official RE2020 summer comfort (DH): occupied hours of the adaptive-comfort period, limit
 # min(max(26, 0.33·T_rm + 20.8), 28) from 6h to 22h and 26 °C during the sleep period (re2020.py).
-# The room air temperature stands in for the operative temperature.
+# Evaluated with T_comf (operative temperature by default, see COMFORT_TEMP).
 hour_h   = np.arange(N) % S
 adapt_h  = np.repeat(adaptive_period(rm_year)[(DOY_START - 1 + np.arange(n_days)) % len(rm_year)], S)
 T_lim_h  = hot_discomfort_limit(T_rm_h, hour_h, T_cool_set=26.0, category=1)
 if RE2020:
-    DH_hour  = adaptive_discomfort(T_room, T_rm_h, occ_h, hour_h, adapt_h, T_cool_set=26.0, category=1)
-    re_ev.add_adaptive_discomfort_hours(T_room, T_rm_h, occ_h, hour_h, adapt_h, T_cool_set=26.0,
+    DH_hour  = adaptive_discomfort(T_comf, T_rm_h, occ_h, hour_h, adapt_h, T_cool_set=26.0, category=1)
+    re_ev.add_adaptive_discomfort_hours(T_comf, T_rm_h, occ_h, hour_h, adapt_h, T_cool_set=26.0,
                                         category=1, dt=int(DT))
     DH_total = float(DH_hour.sum())
 
@@ -601,9 +626,9 @@ else:
     T_low, T_high = 0.33 * T_rm_h + 18.8 - 3.0, 0.33 * T_rm_h + 18.8 + 3.0
     ref_h         = summer_h
     COMFORT_LABEL = "EN 15251 cat. II comfort (summer months)"
-in_zone   = ref_h & (T_room >= T_low) & (T_room <= T_high)
-too_hot   = ref_h & (T_room >  T_high)
-too_cold  = ref_h & (T_room <  T_low)
+in_zone   = ref_h & (T_comf >= T_low) & (T_comf <= T_high)
+too_hot   = ref_h & (T_comf >  T_high)
+too_cold  = ref_h & (T_comf <  T_low)
 n_ref     = int(ref_h.sum())
 pct_ok    = 100 * in_zone.sum()  / n_ref if n_ref else 0.0
 pct_hot   = 100 * too_hot.sum()  / n_ref if n_ref else 0.0
@@ -889,24 +914,24 @@ def plot_climate():
 # ── 8.5 Adaptive comfort (EN 15251) ───────────────────────────────────────────
 def plot_comfort_en15251():
     print("  Plotting: comfort_map (EN 15251) ...")
-    cold_off_season = ~summer_h & (T_room < 20.0)
+    cold_off_season = ~summer_h & (T_comf < 20.0)
     fig, ax = plt.subplots(figsize=(10, 8), constrained_layout=True)
     # the adaptive model is only defined for 10 °C <= T_rm <= 30 °C
     x = np.linspace(max(10.0, T_rm_h.min() - 1), min(30.0, T_rm_h.max() + 1), 200)
     ax.fill_between(x, 0.33*x + 18.8 - 3, 0.33*x + 18.8 + 3, color="#B8E0B0",
                     alpha=0.55, label="Zone de confort EN 15251 Cat. II (±3 °C), valable 10 ≤ T_rm ≤ 30 °C")
     ax.plot(x, 0.33*x + 18.8, color="#2E8B57", lw=1.5, ls="--", label="T confort optimale")
-    ax.scatter(T_rm_h[in_zone],  T_room[in_zone],  c="#2E8B57", s=5, alpha=0.35,
+    ax.scatter(T_rm_h[in_zone],  T_comf[in_zone],  c="#2E8B57", s=5, alpha=0.35,
                label=f"Été — en confort  {pct_ok:.0f} %")
-    ax.scatter(T_rm_h[too_hot],  T_room[too_hot],  c="#CC3030", s=5, alpha=0.45,
+    ax.scatter(T_rm_h[too_hot],  T_comf[too_hot],  c="#CC3030", s=5, alpha=0.45,
                label=f"Été — trop chaud  {pct_hot:.0f} %")
-    ax.scatter(T_rm_h[too_cold], T_room[too_cold], c="#1F5F99", s=5, alpha=0.35,
+    ax.scatter(T_rm_h[too_cold], T_comf[too_cold], c="#1F5F99", s=5, alpha=0.35,
                label=f"Été — trop froid  {pct_cold:.0f} %")
     if cold_off_season.any():
-        ax.scatter(T_rm_h[cold_off_season], T_room[cold_off_season], c="#AACCEE", s=3, alpha=0.20,
+        ax.scatter(T_rm_h[cold_off_season], T_comf[cold_off_season], c="#AACCEE", s=3, alpha=0.20,
                    label="Hors été — sous 20 °C")
     ax.set_xlabel("T extérieure de référence T_rm [°C]  (α = 0.8, EN 15251)", fontsize=11)
-    ax.set_ylabel("Température de la pièce [°C]", fontsize=11)
+    ax.set_ylabel(f"Température {COMF_FR} de la pièce [°C]", fontsize=11)
     ax.set_title(f"Confort adaptatif EN 15251 Cat. II — {DESCRIPTION}\n"
                  f"{LABEL}  |  {START_DATE} → {END_DATE}  |  Pièce {LX:g}×{LY:g} m",
                  fontsize=11, fontweight="bold")
@@ -935,16 +960,16 @@ def plot_comfort_re2020():
     ax.axhline(26.0, color="#CC3030", lw=1.4, ls="--", label="Limite haute 22h-6h (sommeil) : 26 °C")
     ax.axhline(HEATING_SETPOINT, color="#1F5F99", lw=1.6,
                label=f"Limite basse = consigne de chauffage {HEATING_SETPOINT:g} °C")
-    ax.scatter(T_rm_h[~occ_h], T_room[~occ_h], c="#999999", s=3, alpha=0.10,
+    ax.scatter(T_rm_h[~occ_h], T_comf[~occ_h], c="#999999", s=3, alpha=0.10,
                label="Heures inoccupées (non comptées)")
-    ax.scatter(T_rm_h[in_zone],  T_room[in_zone],  c="#2E8B57", s=5, alpha=0.35,
+    ax.scatter(T_rm_h[in_zone],  T_comf[in_zone],  c="#2E8B57", s=5, alpha=0.35,
                label=f"En confort  {pct_ok:.0f} %")
-    ax.scatter(T_rm_h[too_hot],  T_room[too_hot],  c="#CC3030", s=5, alpha=0.45,
+    ax.scatter(T_rm_h[too_hot],  T_comf[too_hot],  c="#CC3030", s=5, alpha=0.45,
                label=f"Trop chaud  {pct_hot:.0f} %")
-    ax.scatter(T_rm_h[too_cold], T_room[too_cold], c="#1F5F99", s=5, alpha=0.35,
+    ax.scatter(T_rm_h[too_cold], T_comf[too_cold], c="#1F5F99", s=5, alpha=0.35,
                label=f"Trop froid  {pct_cold:.0f} %")
     ax.set_xlabel("T extérieure de référence T_rm [°C]  (moyenne glissante, α = 0.8)", fontsize=11)
-    ax.set_ylabel("Température de la pièce [°C]", fontsize=11)
+    ax.set_ylabel(f"Température {COMF_FR} de la pièce [°C]", fontsize=11)
     ax.set_title(f"Carte de confort RE2020 — confort adaptatif, catégorie 1 — {DESCRIPTION}\n"
                  f"{LABEL}  |  {START_DATE} → {END_DATE}  |  Pièce {LX:g}×{LY:g} m",
                  fontsize=11, fontweight="bold")
@@ -1023,7 +1048,7 @@ def plot_wall_fields(day, kind, file_name):
 def plot_degree_hours():
     print("  Plotting: degree_hours ...")
     DH_day = daily(DH_hour, np.sum)
-    DJ_day = daily(T_room, lambda x: float(np.maximum(18.0 - x, 0.0).mean()))
+    DJ_day = daily(T_comf, lambda x: float(np.maximum(18.0 - x, 0.0).mean()))
     DH_cum = np.cumsum(DH_day)
     with_heating = N_DAYS >= 150 and not HEATING     # degree-days panel: meaningless when the room is heated
     rows = 3 if with_heating else 2
@@ -1170,20 +1195,14 @@ if RE2020:
             f"Bbio, heating part (2 x B_ch)                     : {rep['BBio']:.1f} points",
             f"Primary energy, heating only (x2.3 electricity)   : {rep['ep_heat']:.1f} kWh_ep/(m2.yr)",
         ]
-    re_lines.append("Partial: no cooling, lighting, hot-water or auxiliaries needs; room air temperature "
-                    "used as operative temperature.")
+    re_lines.append("Partial: no cooling, lighting, hot-water or auxiliaries needs; comfort evaluated with the "
+                    + ("operative temperature (air + mean radiant)/2." if COMFORT_TEMP == "operative"
+                       else "room air temperature (stands in for the operative temperature)."))
     print("-" * 66)
     for line in re_lines:
         print("  " + line)
     with open(os.path.join(OUT_DIR, "re2020_report.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(re_lines) + "\n")
-
-# Every parameter used and the key indicators, saved next to the PDFs
-with open(os.path.join(OUT_DIR, "run_config.txt"), "w", encoding="utf-8") as f:
-    f.write(f"# simulation.py  run {RUN_ID}  scenario = {SCENARIO}"
-            + (f"  ({SCENARIO_NOTE})" if SCENARIO_NOTE else "") + "\n")
-    for k in _CONFIG_NAMES:
-        f.write(f"{k} = {globals()[k]!r}\n")
 
 summary = {
     "scenario": SCENARIO, "note": SCENARIO_NOTE, "run_id": RUN_ID,
@@ -1193,6 +1212,7 @@ summary = {
     "ach_base": ACH_BASE, "ach_overvent": ACH_OVERVENT, "heating": HEATING, "re2020": RE2020,
     "T_max_out": float(T_out.max()), "T_max_room": float(T_room.max()),
     "T_min_room": float(T_room.min()),
+    "comfort_temperature": COMFORT_TEMP, "T_max_op": float(T_op.max()), "T_min_op": float(T_op.min()),
     "DH_RE2020": float(DH_total), "DH_28C": float(DH_28),
     "comfort_model": COMFORT_MAP, "comfort_ok_pct": float(pct_ok),
     "comfort_hot_pct": float(pct_hot), "comfort_cold_pct": float(pct_cold),
@@ -1203,15 +1223,29 @@ summary = {
     "interior_Sd": dict(WALL_INTERIOR_SD), "hygro_effect": HYGRO_EFFECT,
     "spinup_days": SPINUP_DAYS,
     "heating_season": HEATING_SEASON if HEATING else None,
+    "material_params": {m: v for m, v in MATERIALS_IN_FORCE.items()
+                        if any(m == mat for layers in WALL_LAYERS.values() for mat, _ in layers)},
 }
+
+# Every parameter used and the key indicators, saved next to the PDFs
+with open(os.path.join(OUT_DIR, "run_config.txt"), "w", encoding="utf-8") as f:
+    f.write(f"# simulation.py  run {RUN_ID}  scenario = {SCENARIO}"
+            + (f"  ({SCENARIO_NOTE})" if SCENARIO_NOTE else "") + "\n")
+    for k in _CONFIG_NAMES:
+        f.write(f"{k} = {globals()[k]!r}\n")
+    for m, vals in summary["material_params"].items():           # property values in force
+        f.write(f"# {m}: {vals!r}\n")
+
 # hourly series (for comparing runs or plotting elsewhere); row k = state at hour k of the period
 np.savetxt(os.path.join(OUT_DIR, "series.csv"),
            np.column_stack([np.arange(N) // S, np.arange(N) % S, T_out, RH_out, T_room, RH_room,
                             Q_heat if HEATING else np.zeros(N), Q_lat, occ_h.astype(int),
-                            T_rm_h, DH_hour, T_lim_h, adapt_h.astype(int), Q_int_h, G_int_h, ACH_h]),
+                            T_rm_h, DH_hour, T_lim_h, adapt_h.astype(int), Q_int_h, G_int_h, ACH_h,
+                            T_mrt, T_op, T_si]),
            delimiter=",", fmt="%.4f", comments="",
            header="day,hour,T_out,RH_out,T_room,RH_room,Q_heat_W,Q_lat_W,occupied,T_rm,DH_h,"
-                  "T_lim,adaptive_period,Q_int_W,G_int_kg_h,ACH")
+                  "T_lim,adaptive_period,Q_int_W,G_int_kg_h,ACH,T_mrt,T_op,"
+                  + ",".join(f"Tsi_{n}" for n in WALL_NAMES))
 # temperature and RH at every node of every wall, every hour (same row index as series.csv)
 np.savez_compressed(
     os.path.join(OUT_DIR, "wall_fields.npz"), walls=np.array(list(ORIENT)),

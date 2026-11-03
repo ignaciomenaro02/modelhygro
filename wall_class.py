@@ -61,8 +61,9 @@ class Wall:
         Initial relative humidity field [-]. Same broadcasting rule.
     """
 
-    def __init__(self, layer, h_ext, hm_ext, h_int, hm_int, T_init, RH_init):
+    def __init__(self, layer, h_ext, hm_ext, h_int, hm_int, T_init, RH_init, hygro=True):
         self.layer  = layer
+        self.hygro  = bool(hygro)   # False: heat conduction only (see _coeffs)
         self.h_ext  = float(h_ext)
         self.hm_ext = float(hm_ext)
         self.h_int  = float(h_int)
@@ -240,6 +241,15 @@ class Wall:
         k1 = (lib.Psat(T, RH)
               * np.exp(-lib.Pc(T, RH) / (lib.rhoL * lib.Rv * T))
               * (1 + lib.Pc(T, RH) / (lib.rhoL * lib.Rv * T)))
+
+        if not self.hygro:
+            # Dry wall, as in dynamic thermal simulation: pure conduction with the dry heat capacity.
+            # The moisture equation stays decoupled (no exchange at the surfaces when hm ≈ 0) and no
+            # longer acts on the temperature.
+            R12 = np.zeros_like(R12)
+            R21 = np.zeros_like(R21)
+            R22 = lay.k(T, RH)
+            C22 = lay.rho(T, RH) * lay.Cp(T, RH)
 
         return C11, R11, R12, C22, R22, R21, k0, k1
 

@@ -136,6 +136,10 @@ class WallConfig:
     # Light colour ~0.3, medium ~0.6, dark ~0.9
     absorptance : float         = 0.6
 
+    # False = heat conduction only (dry wall, as in dynamic thermal simulation): no vapour terms in
+    # the energy balance and dry heat capacity. Use it with hm_ext = hm_int ≈ 0.
+    hygro       : bool          = True
+
 
 def make_wall(name, area, orientation='S', layers=None, **kwargs):
     """
