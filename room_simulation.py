@@ -2,175 +2,102 @@
 """
 room_simulation.py
 ==================
-RoomSimulation — couples multiple 1D hygrothermal wall models with a
-lumped room air model.
+One room: a well-mixed air node surrounded by walls, each wall solved in 1D with heat and
+moisture transfer (wall_class.Wall).
 
-Physics
--------
-Each opaque wall is solved with the full 1D coupled heat-and-moisture
-transfer model (WallLayer + Wall).  The room air is modelled as a
-well-mixed single zone:
+Every time step does, in this order:
 
-  Thermal balance (explicit coupling):
-    m_air × Cp_air × dT_room/dt =
-        Σ_walls  [h_int_i × A_i × (T_surf_i − T_room)]   ← wall convection
-      + Σ_windows [U_w   × A_w × (T_ext  − T_room)]       ← window conduction
-      + Σ_bridges [ψ_i   × L_i × (T_ext  − T_room)]       ← thermal bridges
-      + Q_solar                                             ← solar through windows
-      + Q_internal                                          ← occupants + equipment
-      + Q_ventilation                                       ← supply air
-      + Q_HVAC                                              ← heating / cooling
+1. Room air temperature, implicit in time:
+       C·dT/dt = Σ_walls h·A·(T_surface − T) + (Σ U·A_windows + Σ ψ·L + ventilation)·(T_ext − T)
+                 + solar gains through windows + internal gains + heating
+   C is the heat capacity of the air plus an internal mass (furniture, floor, partitions).
+   Heating is an ideal thermostat: exactly the power needed to reach the setpoint, capped.
+2. Room air vapour pressure, implicit in time:
+       (V / (Rv·T))·dPv/dt = Σ_walls hm·A·(Pv_surface − Pv) + ventilation·(Pv_ext − Pv) + sources
+3. Walls, with the new room state as their inner boundary condition and the sol-air
+   temperature T_ext + α·I/h_ext on their outer face.
 
-  Moisture balance:
-    V × d(Pv_room)/dt =
-        (G_walls + G_vent + G_occ) × Rv × T_room           ← [Pa/s]
-
-  where G [kg/s] is vapour mass flux.
-
-Usage
------
-  See simulation.py for a complete example.
+The air and the walls are thus coupled sequentially: the air sees the wall surfaces of the
+previous step, the walls see the air of the current step.
 """
 
 import sys
-import time
 import numpy as np
 
 import library as lib
 from wall_layer import WallLayer
-from wall_class  import Wall
-from solar       import SolarCalculator
+from wall_class import Wall
+
+RHO_AIR = 1.2       # air density [kg/m³]
 
 
 class RoomSimulation:
     """
-    Multi-wall room hygrothermal simulation.
-
-    Parameters
-    ----------
-    wall_configs   : list of WallConfig
-    window_configs : list of WindowConfig
-    bridge_configs : list of ThermalBridge
-    opening_configs: list of OpeningConfig
-    occupants      : OccupantConfig
-    equipment      : EquipmentConfig
-    lighting       : LightingConfig
-    ventilation    : VentilationConfig
-    hvac           : HVACConfig
-    solar_calc     : SolarCalculator
-    volume         : float   Room air volume [m³].
-    internal_mass  : float   Effective internal thermal mass [J/K] (furniture,
-                             floor, partitions). 0 = air only (oscillatory).
-                             ISO 13790 'medium' ≈ 110 kJ/(m²·K) × floor area.
-    T_room_init    : float   Initial room temperature [°C].
-    RH_room_init   : float   Initial room relative humidity [-].
-    re2020         : RE2020Evaluator  (optional, pass None to skip)
-    wall_substeps  : int     Number of wall sub-steps per room step. The wall coefficients are
-                             evaluated at the start of each wall step; with a 1 h step a wet
-                             exterior surface in the sun oscillates by several K from one hour to
-                             the next. 6 sub-steps (600 s) agree with 60 within 0.1 K.
+    wall_configs    : list of WallConfig
+    window_configs  : list of WindowConfig
+    bridge_configs  : list of ThermalBridge
+    opening_configs : list of OpeningConfig (air leaks)
+    occupants, equipment, lighting, ventilation, hvac : configurations from sources.py
+    solar_calc      : SolarCalculator
+    volume          : room air volume [m³]
+    internal_mass   : heat capacity added to the air [J/K] (ISO 13790 medium: 110 kJ/(m²·K) × floor)
+    T_room_init     : initial room and wall temperature [°C]
+    RH_room_init    : initial room and wall relative humidity [-]
+    re2020          : RE2020Evaluator collecting the energy and comfort indicators (or None)
+    wall_substeps   : wall steps per room step. The wall coefficients are taken at the start of
+                      each wall step; with a 1 h step a wet outer surface in the sun oscillates by
+                      several K. 6 sub-steps (600 s) agree with 60 within 0.1 K.
     """
 
-    def __init__(
-        self,
-        wall_configs,
-        window_configs  = None,
-        bridge_configs  = None,
-        opening_configs = None,
-        occupants       = None,
-        equipment       = None,
-        lighting        = None,
-        ventilation     = None,
-        hvac            = None,
-        solar_calc      = None,
-        volume          = None,
-        internal_mass   = None,
-        T_room_init     = 20.0,
-        RH_room_init    = 0.5,
-        re2020          = None,
-        vapor_sources   = None,   # list of VaporSourceConfig
-        wall_substeps   = 1,
-    ):
-        self.wall_configs   = wall_configs
-        self.window_configs = window_configs  or []
-        self.bridge_configs = bridge_configs  or []
-        self.opening_configs= opening_configs or []
-        self.occupants      = occupants
-        self.equipment      = equipment
-        self.lighting       = lighting
-        self.ventilation    = ventilation
-        self.hvac           = hvac
-        self.solar_calc     = solar_calc
-        self.volume         = volume
-        # Effective internal thermal mass (furniture, floor, partitions) [J/K].
-        # Added to the air heat capacity; gives the room realistic inertia.
-        self.internal_mass  = float(internal_mass)
-        self.re2020_ev      = re2020
-        self.vapor_sources  = vapor_sources or []
-        self.StockACH       = []                  # total air-change rate of each step [1/h]
-        self.wall_substeps  = max(1, int(wall_substeps))
+    def __init__(self, wall_configs, window_configs=None, bridge_configs=None, opening_configs=None,
+                 occupants=None, equipment=None, lighting=None, ventilation=None, hvac=None,
+                 solar_calc=None, volume=None, internal_mass=0.0,
+                 T_room_init=20.0, RH_room_init=0.5, re2020=None, wall_substeps=1):
+        self.wall_configs    = wall_configs
+        self.window_configs  = window_configs or []
+        self.bridge_configs  = bridge_configs or []
+        self.opening_configs = opening_configs or []
+        self.occupants       = occupants
+        self.equipment       = equipment
+        self.lighting        = lighting
+        self.ventilation     = ventilation
+        self.hvac            = hvac
+        self.solar_calc      = solar_calc
+        self.volume          = volume
+        self.internal_mass   = float(internal_mass)
+        self.re2020_ev       = re2020
+        self.wall_substeps   = max(1, int(wall_substeps))
 
-        # Room state
-        self.T_room  = float(T_room_init)    # [°C]
-        self.RH_room = float(RH_room_init)   # [-]
-        self.t_sim   = 0.0                   # [s]
+        self.T_room     = float(T_room_init)     # [°C]
+        self.RH_room    = float(RH_room_init)    # [-]
+        self.t_sim      = 0.0                    # [s]
         self.step_count = 0
-        self.dt      = None                  # [s] time step, set when run() is called
 
-        # Build wall objects
-        self.layers = []
-        self.walls  = []
+        # The walls start in equilibrium with the room air
+        self.walls = []
         for cfg in wall_configs:
-            layer = WallLayer(
-                mat       = cfg.mat,
-                emat      = cfg.emat,
-                Mesh_Opt  = cfg.Mesh_Opt,
-                liq       = cfg.liq,
-                mesh_size = cfg.mesh_size,
-                label     = cfg.name,
-            )
-            wall = Wall(
-                layer   = layer,
-                h_ext   = cfg.h_ext,
-                hm_ext  = cfg.hm_ext,
-                h_int   = cfg.h_int,
-                hm_int  = cfg.hm_int,
-                T_init  = T_room_init + 273.15,
-                RH_init = RH_room_init,
-                hygro   = getattr(cfg, "hygro", True),
-            )
-            self.layers.append(layer)
-            self.walls.append(wall)
+            layer = WallLayer(cfg.mat, cfg.emat, Mesh_Opt=cfg.Mesh_Opt, liq=cfg.liq,
+                              mesh_size=cfg.mesh_size, label=cfg.name)
+            self.walls.append(Wall(layer, cfg.h_ext, cfg.hm_ext, cfg.h_int, cfg.hm_int,
+                                   T_init=T_room_init + 273.15, RH_init=RH_room_init, hygro=cfg.hygro))
 
-        # Result storage
-        self.StockT_room  = [self.T_room]
-        self.StockRH_room = [self.RH_room]
-        self.StockQ_HVAC  = [0.0]
-        # Store the initial interior-surface temperature too, so every result
-        # series has the same length (initial value + one per step).
-        self.StockT_walls = {
-            cfg.name: [float(wall.T[-1, 0]) - 273.15]
-            for cfg, wall in zip(wall_configs, self.walls)
-        }
-        # Per-wall sensible heat flux wall→room [W]  (h_int·A·(T_surf−T_room))
-        # positive = heat flowing INTO the room from that wall
-        self.StockQ_sens_walls = {cfg.name: [0.0] for cfg in wall_configs}
-        # Total latent heat flux all walls→room [W]  (Lv·Σhm·A·(Pv_surf−Pv_room))
-        self.StockQ_lat_total  = [0.0]
+        # Histories: the initial value, then one value per step
+        self.StockT_room      = [self.T_room]
+        self.StockRH_room     = [self.RH_room]
+        self.StockQ_HVAC      = [0.0]           # heating (+) or cooling (−) power [W]
+        self.StockQ_lat_total = [0.0]           # latent heat of the wall moisture exchange [W]
+        self.StockACH         = []              # air change rate of each step [1/h]
+        self.StockT_walls     = {cfg.name: [float(w.T[-1, 0]) - 273.15]   # inner surface [°C]
+                                 for cfg, w in zip(wall_configs, self.walls)}
 
-        # Energy accumulators [kWh]
-        self.E_heat_kWh = 0.0
-        self.E_cool_kWh = 0.0
-
-    # ── Spin-up ───────────────────────────────────────────────────────────────
+        self.E_heat_kWh = 0.0                   # final heating energy
+        self.E_cool_kWh = 0.0                   # final cooling energy
 
     def load_state(self, other):
         """
-        Start from the final state of another simulation (spin-up / warm-up run).
-
-        Copies the room air state and, node by node, the temperature and moisture fields of
-        every wall; the two simulations must have the same walls and mesh. All the result
-        histories restart from this state, so a spin-up run leaves no trace in the results.
+        Start from the final state of another simulation with the same walls (the spin-up run).
+        Room air and wall fields are copied node by node, and every history restarts from there,
+        so the spin-up leaves no trace in the results.
         """
         self.T_room, self.RH_room = other.T_room, other.RH_room
         for wall, ref in zip(self.walls, other.walls):
@@ -178,322 +105,163 @@ class RoomSimulation:
             wall.StockT  = [wall.T.copy()]
             wall.StockRH = [wall.RH.copy()]
             wall.StockPc = [wall.Pc.copy()]
-            wall.Stockw  = [wall.layer.w(wall.T, wall.RH)]
         self.StockT_room  = [self.T_room]
         self.StockRH_room = [self.RH_room]
         for name, wall in zip(list(self.StockT_walls), self.walls):
             self.StockT_walls[name] = [float(wall.T[-1, 0]) - 273.15]
 
-    # ── Single time step ───────────────────────────────────────────────────────    
-
-    def step(self, T_ext_C: float, RH_ext: float, dt: float,
-             Q_extra_W: float = 0.0):
+    def step(self, T_ext_C, RH_ext, dt, Q_extra_W=0.0):
         """
-        Advance the room and all walls by one time step dt [s].
+        Advance the room and its walls by dt [s].
 
-        Parameters
-        ----------
-        T_ext_C   : float   Exterior temperature [°C].
-        RH_ext    : float   Exterior relative humidity [-].
-        dt        : float   Time step [s].
-        Q_extra_W : float   Additional heat flux [W] injected into the room
-                            (positive = heating).  Used for inter-room coupling:
-                            Q = Σ_j  UA_ij × (T_j − T_room)   [explicit step].
+        T_ext_C, RH_ext : outdoor air temperature [°C] and relative humidity [-]
+        Q_extra_W       : extra heat injected in the room air [W], e.g. the exchange with a
+                          neighbouring room when several rooms are coupled
         """
+        n        = self.step_count
         T_room_K = self.T_room + 273.15
-        T_ext_K  = T_ext_C    + 273.15
+        T_ext_K  = T_ext_C + 273.15
         Pv_room  = lib.Pv(T_room_K, self.RH_room)
-        Pv_ext   = lib.Pv(T_ext_K,  RH_ext)
+        Pv_ext   = lib.Pv(T_ext_K, RH_ext)
 
-        # ── 1. Wall ↔ room exchange (conductance form) ─────────────────────────
-        # Thermal flux is  Σ h_int·A·(T_surf − T_room).  We split it into a
-        # conductance G_walls_th [W/K] and a "drive" Σ h_int·A·T_surf so the air
-        # temperature can be solved IMPLICITLY below (stable at any time step).
-        G_walls_th    = 0.0   # [W/K]  air↔walls thermal conductance
-        Qdrive_walls  = 0.0   # [W]    Σ h_int·A·T_surf
-        G_mois_cond   = 0.0   # [kg/(s·Pa)] moisture conductance (implicit)
-        G_mois_drive  = 0.0   # [kg/s]      moisture drive (independent of Pv_room)
-        Glat_cond_w   = 0.0   # [kg/(s·Pa)]  Σ hm_int·A        (walls only)
-        Glat_drive_w  = 0.0   # [kg/s]       Σ hm_int·A·Pv_surf (walls only)
-        _q_sens_walls = []    # per-wall sensible flux [W] for this step
+        # ── Exchanges with the walls (surface state of the previous step) ──────
+        # Written as conductance × (driving value − room value) so the room can be solved implicitly
+        G_walls, Q_walls = 0.0, 0.0       # Σ h·A [W/K] and Σ h·A·T_surface [W]
+        Gm_walls, M_walls = 0.0, 0.0      # Σ hm·A [kg/(s·Pa)] and Σ hm·A·Pv_surface [kg/s]
+        for wall, cfg in zip(self.walls, self.wall_configs):
+            T_s  = float(wall.T[-1, 0])
+            Pv_s = lib.Pv(T_s, float(wall.RH[-1, 0]))
+            G_walls  += cfg.h_int * cfg.area
+            Q_walls  += cfg.h_int * cfg.area * T_s
+            Gm_walls += cfg.hm_int * cfg.area
+            M_walls  += cfg.hm_int * cfg.area * Pv_s
 
-        for wall_obj, cfg in zip(self.walls, self.wall_configs):
-            T_surf  = float(wall_obj.T[-1, 0])    # interior surface [K]
-            RH_surf = float(wall_obj.RH[-1, 0])
-            Pv_surf = lib.Pv(T_surf, RH_surf)
+        # Latent heat of the moisture the walls release (+) or take up (−) [W]. Reported only:
+        # the evaporation heat is already taken from the wall surface in its own boundary
+        # condition, so adding it to the air would count it twice.
+        Q_lat_walls = lib.Lv * (M_walls - Gm_walls * Pv_room)
 
-            G_walls_th   += cfg.h_int  * cfg.area
-            Qdrive_walls += cfg.h_int  * cfg.area * T_surf
-            G_mois_cond  += cfg.hm_int * cfg.area
-            G_mois_drive += cfg.hm_int * cfg.area * Pv_surf
-            Glat_cond_w  += cfg.hm_int * cfg.area
-            Glat_drive_w += cfg.hm_int * cfg.area * Pv_surf
-            # Sensible flux wall→room [W]:  positive = heat into room
-            _q_sens_walls.append(cfg.h_int * cfg.area * (T_surf - T_room_K))
-
-        # ── 2-3. Windows + thermal bridges (exchange with OUTDOOR air) ─────────
-        G_windows = sum(w.U_value * w.area for w in self.window_configs)   # [W/K]
-        G_bridges = sum(b.psi * b.length   for b in self.bridge_configs)   # [W/K]
-
-        # ── 4. Solar gains (independent of T_room) ─────────────────────────────
-        Q_solar = 0.0
-        if self.solar_calc is not None:
-            for w in self.window_configs:
-                Q_solar += self.solar_calc.solar_gains_window(self.t_sim, w)
-
-        # ── 5. Internal gains (independent of T_room) ──────────────────────────
-        Q_internal = 0.0
-        G_internal = 0.0   # [kg/s]
-
+        # ── Gains that do not depend on the room temperature ───────────────────
+        Q_solar = sum(self.solar_calc.solar_gains_window(self.t_sim, w) for w in self.window_configs) \
+            if self.solar_calc is not None else 0.0
+        Q_int, M_int = 0.0, 0.0           # internal heat [W] and vapour [kg/s]
         if self.occupants is not None:
-            Q_internal += self.occupants.sensible_at(self.step_count)
-            G_internal += self.occupants.moisture_at(self.step_count)
+            Q_int += self.occupants.sensible_at(n)
+            M_int += self.occupants.moisture_at(n)
         if self.equipment is not None:
-            Q_internal += self.equipment.heat_at(self.step_count)
+            Q_int += self.equipment.heat_at(n)
         if self.lighting is not None:
-            Q_internal += self.lighting.heat_at(self.step_count)
-        for vs in self.vapor_sources:
-            G_internal  += vs.moisture_at(self.step_count)
-            Q_internal  += vs.latent_heat_at(self.step_count)
+            Q_int += self.lighting.heat_at(n)
 
-        # ── 6. Ventilation + infiltration (exchange with OUTDOOR air) ──────────
-        n_ach = 0.0
-        if self.ventilation is not None:
-            n_ach = self.ventilation.flow_at(self.step_count, self.T_room, T_ext_C)
-        for op in self.opening_configs:
-            n_ach += op.ach_contribution
+        # ── Exchanges with the outdoor air ─────────────────────────────────────
+        ach = self.ventilation.flow_at(n, self.T_room, T_ext_C) if self.ventilation is not None else 0.0
+        ach += sum(op.ach_contribution for op in self.opening_configs)
+        q_air    = ach * self.volume / 3600.0                                   # [m³/s]
+        hrv      = getattr(self.ventilation, "hrv_efficiency", 0.0)    if self.ventilation else 0.0
+        hrv_mois = getattr(self.ventilation, "moisture_recovery", 0.0) if self.ventilation else 0.0
 
-        n_vol_s  = n_ach * self.volume / 3600.0     # [m³/s]
-        rho_air  = 1.2                               # [kg/m³]
-        hrv      = getattr(self.ventilation, 'hrv_efficiency',    0.0) if self.ventilation else 0.0
-        hrv_mois = getattr(self.ventilation, 'moisture_recovery', 0.0) if self.ventilation else 0.0
+        G_ext = (sum(w.U_value * w.area for w in self.window_configs)          # windows
+                 + sum(b.psi * b.length for b in self.bridge_configs)          # thermal bridges
+                 + q_air * RHO_AIR * lib.CpA * (1.0 - hrv))                    # air renewal [W/K]
+        # vapour carried by the air: flow × Pv/(Rv·T)
+        Gm_vent = q_air / (lib.Rv * T_room_K) * (1.0 - hrv_mois)               # [kg/(s·Pa)]
 
-        G_vent_th = n_vol_s * rho_air * lib.CpA * (1.0 - hrv)             # [W/K]
-        # Moisture ventilation — split into cond+drive for implicit solve.
-        # Vapour mass flow = air flow × vapour density, rho_v = Pv / (Rv·T)  [kg/(s·Pa) × Pa].
-        # (rho_air was multiplied in by mistake before: 20 % too much vapour exchanged.)
-        _vent_mois_cond  = n_vol_s / (lib.Rv * T_room_K) * (1.0 - hrv_mois)
-        G_mois_cond  += _vent_mois_cond
-        G_mois_drive += _vent_mois_cond * Pv_ext
+        # ── Room temperature (implicit Euler) ──────────────────────────────────
+        #   T_new = (a·T_old + Q_drive + Q_HVAC) / D,   a = C/dt,   D = a + Σ conductances
+        a       = (RHO_AIR * self.volume * lib.CpA + self.internal_mass) / dt
+        D       = a + G_walls + G_ext
+        Q_drive = Q_walls + G_ext * T_ext_K + Q_solar + Q_int + Q_extra_W
+        T_free  = (a * T_room_K + Q_drive) / D           # temperature without heating [K]
 
-        # ── 7. Implicit room-air energy balance ────────────────────────────────
-        # Backward-Euler step of   C_eff·dT/dt = Σ G_i·(T_i − T_room) + Q_indep:
-        #
-        #     T_new = (a·T_old + Q_drive + Q_HVAC) / (a + G_tot),   a = C_eff/dt
-        #
-        # This is STABLE for any dt — it removes the explicit-scheme oscillation
-        # that appeared when the air time-constant (~7 min) was below the step.
-        # C_eff = air heat capacity + internal thermal mass (furniture/floor).
-        m_air   = rho_air * self.volume                    # [kg]
-        C_eff   = m_air * lib.CpA + self.internal_mass     # [J/K]
-        a       = C_eff / dt                               # [W/K]
+        Q_HVAC = self._thermostat(T_free, a * T_room_K + Q_drive, D, dt)
 
-        G_env   = G_windows + G_bridges + G_vent_th        # conductance to outdoor air
-        G_tot   = G_walls_th + G_env                       # [W/K] total air conductance
-        Q_indep = Q_solar + Q_internal + Q_extra_W         # [W] T-independent gains
+        self.T_room = float(np.clip((a * T_room_K + Q_drive + Q_HVAC) / D - 273.15, -10.0, 50.0))
 
-        # Latent heat of the moisture exchanged wall ↔ room air [W], reported only:
-        #   Q_lat = Lv × Σ hm_int·A·(Pv_surf − Pv_room)     (+ = the walls release moisture)
-        # It is NOT added to the room-air heat balance: the vapour keeps its latent heat as
-        # humidity, it does not condense in the air. The evaporation heat is drawn from the wall
-        # surface (wall boundary condition), which then takes sensible heat from the air.
-        # Adding it to the air would count the same energy twice.
-        Q_lat_walls = lib.Lv * (Glat_drive_w - Glat_cond_w * Pv_room)  # [W]
+        # ── Room humidity (implicit Euler) ─────────────────────────────────────
+        #   Pv_new = (b·Pv_old + sources) / (b + Σ conductances),   b = V/(Rv·T·dt)
+        b      = self.volume / (lib.Rv * T_room_K) / dt
+        Pv_new = (b * Pv_room + M_walls + Gm_vent * Pv_ext + M_int) / (b + Gm_walls + Gm_vent)
+        Psat   = lib.Psat(self.T_room + 273.15, self.RH_room)
+        self.RH_room = float(np.clip(max(Pv_new, 0.0) / Psat, 0.05, 1.0))
 
-        Q_drive = Qdrive_walls + G_env * T_ext_K + Q_indep
-        D       = a + G_tot
-
-        T_old_K  = T_room_K
-        T_free_K = (a * T_old_K + Q_drive) / D             # room temperature WITHOUT HVAC
-
-        # ── 8. Ideal thermostat — solved implicitly (no overshoot, no cycling) ─
-        # If the free-floating temperature would leave the comfort band, inject
-        # exactly the power needed to land ON the setpoint (capped at max power).
-        Q_HVAC = 0.0
-        if self.hvac is not None:
-            # An optional heating controller (e.g. the RE2020 scenario in heating.py) can
-            # change the setpoint over time or forbid heating (None) outside its season.
-            ctrl       = getattr(self.hvac, 'heating_control', None)
-            T_heat_set = (self.hvac.T_heat_set if ctrl is None
-                          else ctrl.heating_setpoint(self.step_count))
-            T_heat_K   = None if T_heat_set is None else T_heat_set + 273.15
-            T_cool_K   = self.hvac.T_cool_set + 273.15
-
-            if T_heat_K is not None and T_free_K < T_heat_K:
-                Q_HVAC = float(np.clip(T_heat_K * D - (a * T_old_K + Q_drive),
-                                       0.0, self.hvac.max_power_heat))
-                dE_heat = Q_HVAC / self.hvac.efficiency_heat * dt / 3.6e6
-                self.E_heat_kWh += dE_heat
-                if self.re2020_ev is not None:
-                    self.re2020_ev.add_heating_kWh(dE_heat, self.hvac.energy_carrier)  # final
-                    self.re2020_ev.add_heating_need_kWh(Q_HVAC * dt / 3.6e6)           # need (BBio)
-
-            elif T_free_K > T_cool_K:
-                Q_HVAC = float(np.clip(T_cool_K * D - (a * T_old_K + Q_drive),
-                                       -self.hvac.max_power_cool, 0.0))
-                dE_cool = abs(Q_HVAC) / self.hvac.efficiency_cool * dt / 3.6e6
-                self.E_cool_kWh += dE_cool
-                if self.re2020_ev is not None:
-                    self.re2020_ev.add_cooling_kWh(dE_cool, self.hvac.energy_carrier)  # final
-                    self.re2020_ev.add_cooling_need_kWh(abs(Q_HVAC) * dt / 3.6e6)      # need (BBio)
-
-            if ctrl is not None:
-                ctrl.record(self.step_count, T_free_K - 273.15, max(Q_HVAC, 0.0), dt)
-
-        # ── 9. New room temperature (implicit solution) ────────────────────────
-        T_new_K     = (a * T_old_K + Q_drive + Q_HVAC) / D
-        self.T_room = float(np.clip(T_new_K - 273.15, -10.0, 50.0))
-
-        # ── 10. Room moisture — implicit backward-Euler step ──────────────────
-        # Pv_room-dependent terms are collected as G_mois_cond [kg/(s·Pa)] and
-        # G_mois_drive [kg/s].  Occupant vapour is a pure source (no Pv_room dep).
-        # Capacitance equation:  C/dt·(Pv_new − Pv_old) = G_drive − G_cond·Pv_new
-        # → Pv_new = (C/dt·Pv_old + G_drive) / (C/dt + G_cond)   — stable for any dt.
-        G_mois_drive += G_internal   # [kg/s] occupant moisture (source term)
-        C_mois  = self.volume / (lib.Rv * T_room_K)   # [kg/Pa] moisture capacitance
-        a_mois  = C_mois / dt
-        Pv_new  = (a_mois * Pv_room + G_mois_drive) / (a_mois + G_mois_cond)
-        Pv_new  = max(Pv_new, 0.0)
-        Psat_new = lib.Psat(self.T_room + 273.15, self.RH_room)
-        self.RH_room = float(np.clip(Pv_new / Psat_new, 0.05, 1.0))
-
-        # ── 11. Step walls with updated room state as interior BC ──────────────
-        # Sol-air temperature: accounts for solar radiation absorbed on the
-        # opaque exterior surface.  T_sol-air = T_ext + α·I_sol / h_ext
-        # (ISO 13791 / EN ISO 52016).  For well-insulated walls the extra
-        # heat flux is modest (~1–3 W/K), but the exterior surface temperature
-        # is significantly raised on sunny summer afternoons.
+        # ── Walls ──────────────────────────────────────────────────────────────
+        # Outer face: sol-air temperature for the heat, but the vapour pressure of the outdoor
+        # air (the sun heats the surface, it does not add vapour).
         T_room_new_K = self.T_room + 273.15
-        for wall_obj, cfg in zip(self.walls, self.wall_configs):
+        for wall, cfg in zip(self.walls, self.wall_configs):
+            T_sol_air = T_ext_K
             if self.solar_calc is not None:
-                I_sol = self.solar_calc.irradiance(
-                    self.t_sim, cfg.orientation,
-                    getattr(cfg, 'tilt', 90.0))
-                alpha = getattr(cfg, 'absorptance', 0.6)
-                T_sol_air_K = T_ext_K + alpha * I_sol / cfg.h_ext
-            else:
-                T_sol_air_K = T_ext_K
-            # the vapour pressure is the one of the outdoor AIR (T_ext, RH_ext), not of the
-            # sol-air temperature: the sun heats the surface, it does not add water vapour
-            # same boundary conditions over the whole step, only the final state is stored
-            n_sub = self.wall_substeps
-            for j in range(n_sub):
-                wall_obj.step(T_sol_air_K, RH_ext, T_room_new_K, self.RH_room, dt / n_sub,
-                              Pv_ext=Pv_ext, store=(j == n_sub - 1))
+                I = self.solar_calc.irradiance(self.t_sim, cfg.orientation, cfg.tilt)
+                T_sol_air = T_ext_K + cfg.absorptance * I / cfg.h_ext
+            for j in range(self.wall_substeps):
+                wall.step(T_sol_air, RH_ext, T_room_new_K, self.RH_room, dt / self.wall_substeps,
+                          Pv_ext=Pv_ext, store=(j == self.wall_substeps - 1))
 
-        # ── 12. RE2020 discomfort ──────────────────────────────────────────────
         if self.re2020_ev is not None:
-            self.re2020_ev.add_discomfort_hours(
-                np.array([self.T_room]), dt)
+            self.re2020_ev.add_discomfort_hours(np.array([self.T_room]), dt)
 
-        # ── Store results ──────────────────────────────────────────────────────
         self.StockT_room.append(self.T_room)
         self.StockRH_room.append(self.RH_room)
         self.StockQ_HVAC.append(Q_HVAC)
-        for cfg, wall_obj in zip(self.wall_configs, self.walls):
-            self.StockT_walls[cfg.name].append(float(wall_obj.T[-1, 0]) - 273.15)
-        for cfg, qsw in zip(self.wall_configs, _q_sens_walls):
-            self.StockQ_sens_walls[cfg.name].append(qsw)
         self.StockQ_lat_total.append(Q_lat_walls)
-        self.StockACH.append(n_ach)
+        self.StockACH.append(ach)
+        for cfg, wall in zip(self.wall_configs, self.walls):
+            self.StockT_walls[cfg.name].append(float(wall.T[-1, 0]) - 273.15)
 
-        self.t_sim += dt
+        self.t_sim      += dt
         self.step_count += 1
 
-    # ── Full simulation loop ───────────────────────────────────────────────────
-
-    def run(
-        self,
-        time_bc  : np.ndarray,
-        Text_bc  : np.ndarray,
-        RHext_bc : np.ndarray,
-        dt       : float = 3600.0,
-        verbose  : bool  = True,
-    ):
+    def _thermostat(self, T_free, num, D, dt):
         """
-        Run the full simulation over the climate boundary conditions.
-
-        Parameters
-        ----------
-        time_bc  : array   Time vector [s].
-        Text_bc  : array   Exterior temperature [°C].
-        RHext_bc : array   Exterior relative humidity [-].
-        dt       : float   Time step [s].  Default 3600 s (1 h).
-        verbose  : bool    Print progress bar.
+        Ideal heating and cooling: if the free temperature T_free [K] is outside the setpoints,
+        return the power [W] that brings the room exactly onto the setpoint, within the power
+        limits (T_new = (num + Q)/D, so Q = T_set·D − num). Also counts the energy.
         """
-        self.dt = dt                 # remember the step so outputs can scale correctly
-        t_tot   = int(time_bc.max())
-        n_steps = int(t_tot / dt)
+        if self.hvac is None:
+            return 0.0
+        # A heating controller (heating.RE2020Heating) can change the setpoint hour by hour,
+        # or forbid heating (setpoint None) outside the heating season
+        ctrl  = getattr(self.hvac, "heating_control", None)
+        T_set = self.hvac.T_heat_set if ctrl is None else ctrl.heating_setpoint(self.step_count)
+        T_heat = None if T_set is None else T_set + 273.15
+        T_cool = self.hvac.T_cool_set + 273.15
 
-        def _interp(t):
-            return (
-                float(np.interp(t, time_bc, Text_bc)),
-                float(np.interp(t, time_bc, RHext_bc)),
-            )
+        Q = 0.0
+        if T_heat is not None and T_free < T_heat:
+            Q = float(np.clip(T_heat * D - num, 0.0, self.hvac.max_power_heat))
+            E = Q / self.hvac.efficiency_heat * dt / 3.6e6
+            self.E_heat_kWh += E
+            if self.re2020_ev is not None:
+                self.re2020_ev.add_heating_kWh(E, self.hvac.energy_carrier)       # final energy
+                self.re2020_ev.add_heating_need_kWh(Q * dt / 3.6e6)               # need (Bbio)
+        elif T_free > T_cool:
+            Q = float(np.clip(T_cool * D - num, -self.hvac.max_power_cool, 0.0))
+            E = -Q / self.hvac.efficiency_cool * dt / 3.6e6
+            self.E_cool_kWh += E
+            if self.re2020_ev is not None:
+                self.re2020_ev.add_cooling_kWh(E, self.hvac.energy_carrier)
+                self.re2020_ev.add_cooling_need_kWh(-Q * dt / 3.6e6)
 
-        def _update_progress(title, progress):
-            length = 20
-            block  = int(round(length * progress))
-            msg    = "\r{0}: [{1}] {2}%".format(
-                        title,
-                        "#" * block + "-" * (length - block),
-                        round(progress * 100, 1))
-            if progress >= 1.0:
-                msg += " DONE\r\n"
-            sys.stdout.write(msg)
-            sys.stdout.flush()
+        if ctrl is not None:
+            ctrl.record(self.step_count, T_free - 273.15, max(Q, 0.0), dt)
+        return Q
 
-        if verbose:
-            print(f"\nRoom simulation: {n_steps} steps "
-                  f"({t_tot / 86400:.0f} days), dt={dt:.0f} s")
-        t_start = time.process_time()
-
-        for step in range(n_steps):
-            t_sim     = step * dt
-            T_e, RH_e = _interp(t_sim + dt)
-            self.step(T_e, RH_e, dt)
+    def run(self, time_bc, Text_bc, RHext_bc, dt=3600.0, verbose=True):
+        """
+        Run over the outdoor conditions Text_bc [°C] and RHext_bc [-] given at the times time_bc [s].
+        Each step uses the outdoor conditions at its end.
+        """
+        n_steps = int(time_bc.max() / dt)
+        for s in range(n_steps):
+            t = (s + 1) * dt
+            self.step(float(np.interp(t, time_bc, Text_bc)), float(np.interp(t, time_bc, RHext_bc)), dt)
 
             if verbose:
-                _update_progress("Simulation", (step + 1) / n_steps)
-
-            # NaN guard
+                done = (s + 1) / n_steps
+                bar  = "#" * int(round(20 * done))
+                sys.stdout.write(f"\rSimulation: [{bar:<20}] {done * 100:.1f}%" + (" DONE\n" if done >= 1 else ""))
+                sys.stdout.flush()
             if np.isnan(self.T_room) or np.isnan(self.RH_room):
-                print(f"\n[!] NaN in room state at step {step+1} — stopping.")
+                print(f"\n[!] NaN in the room state at step {s + 1}: stopping.")
                 break
-
-        elapsed = time.process_time() - t_start
-        if verbose:
-            print(f"Completed in {elapsed:.1f} s")
-
         return np.array(self.StockT_room), np.array(self.StockRH_room)
-
-    # ── Summary ───────────────────────────────────────────────────────────────
-
-    def print_summary(self):
-        """Print a quick energy and comfort summary."""
-        T_arr  = np.array(self.StockT_room)
-        RH_arr = np.array(self.StockRH_room)
-        Q_arr  = np.array(self.StockQ_HVAC)
-
-        print("\n" + "─"*50)
-        print("  ROOM SIMULATION SUMMARY")
-        print("─"*50)
-        print(f"  Walls     : {len(self.wall_configs)}")
-        for cfg, layer in zip(self.wall_configs, self.layers):
-            print(f"    · {cfg.name:<20}  U = {layer.U_value():.2f} W/(m²K)"
-                  f"  A = {cfg.area:.1f} m²  [{cfg.orientation}]")
-        print(f"  Windows   : {len(self.window_configs)}")
-        for w in self.window_configs:
-            print(f"    · {w.name:<20}  U = {w.U_value:.2f}  g = {w.g_value}  [{w.orientation}]")
-        print(f"  Bridges   : {len(self.bridge_configs)}")
-        print("─"*50)
-        print(f"  Room temperature  :  mean {T_arr.mean():.1f}°C  "
-              f"min {T_arr.min():.1f}°C  max {T_arr.max():.1f}°C")
-        print(f"  Room RH           :  mean {RH_arr.mean()*100:.1f}%  "
-              f"min {RH_arr.min()*100:.1f}%  max {RH_arr.max()*100:.1f}%")
-        print(f"  Heating energy    :  {self.E_heat_kWh:.1f} kWh")
-        print(f"  Cooling energy    :  {self.E_cool_kWh:.1f} kWh")
-        dt_h = (self.dt or 3600) / 3600.0       # hours per step
-        DH = float(np.maximum(T_arr - 28.0, 0.0).sum()) * dt_h   # [°C·h]
-        print(f"  DH discomfort     :  {DH:.0f} °C·h  (RE2020 limit 1250)")
-        print("─"*50 + "\n")

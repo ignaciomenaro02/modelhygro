@@ -2,289 +2,123 @@
 """
 sources.py
 ==========
-Internal heat/moisture sources and HVAC system configuration.
+What happens inside the room besides the walls: occupants, appliances, lighting, ventilation
+and the heating/cooling system.
 
-Classes
--------
-OccupantConfig      Sensible + latent gains from occupants.
-EquipmentConfig     Plug loads and appliances.
-LightingConfig      Artificial lighting gains.
-VentilationConfig   Mechanical ventilation (with optional heat recovery).
-HVACConfig          Heating/cooling setpoints and system parameters.
-
-All schedule arrays must have exactly n_steps values (one per time step),
-or be None (constant operation assumed).
+Schedules are lists with one factor (0-1) per simulation step; None means "always on".
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Optional
-import numpy as np
+
+LV = 2.5e6   # latent heat of evaporation [J/kg]
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Occupants
-# ══════════════════════════════════════════════════════════════════════════════
+def _factor(schedule, step):
+    return schedule[step] if schedule is not None else 1.0
+
 
 @dataclass
 class OccupantConfig:
     """
-    Internal gains from building occupants.
-
-    Parameters
-    ----------
-    n_occupants        : float   Average number of occupants [-].
-    sensible_per_person: float   Sensible heat gain [W/person].
-                                 Typical: 70 W (sedentary), 120 W (light activity).
-    latent_per_person  : float   Latent (moisture) heat gain [W/person].
-                                 Typical: 60 W → ~0.04 kg/h water vapour per person.
-    schedule           : list    Hourly occupation factor [0–1] over the full
-                                 simulation (length = n_steps).  None = always full.
-
-    Moisture production
-    -------------------
-    Water vapour mass flow from occupants:
-        G_occ [kg/s] = n_occ × latent_per_person / Lv
-    where Lv = 2.5e6 J/kg (latent heat of evaporation).
+    Occupants: sensible heat, and water vapour given as a latent power.
+    The vapour flow is latent_per_person / Lv (60 W ≈ 86 g/h per person).
     """
-    n_occupants         : float         = 2.0
-    sensible_per_person : float         = 80.0    # [W/person]
-    latent_per_person   : float         = 60.0    # [W/person]
-    schedule            : Optional[List[float]] = None   # [0–1] per step
+    n_occupants         : float = 2.0
+    sensible_per_person : float = 80.0    # [W]
+    latent_per_person   : float = 60.0    # [W]
+    schedule            : Optional[List[float]] = None
 
     def sensible_at(self, step: int) -> float:
-        """Sensible gain [W] at simulation step `step`."""
-        factor = self.schedule[step] if self.schedule is not None else 1.0
-        return self.n_occupants * self.sensible_per_person * factor
+        """Sensible heat [W]."""
+        return self.n_occupants * self.sensible_per_person * _factor(self.schedule, step)
 
     def moisture_at(self, step: int) -> float:
-        """Moisture vapour production [kg/s] at step `step`."""
-        Lv = 2.5e6  # J/kg
-        factor = self.schedule[step] if self.schedule is not None else 1.0
-        return self.n_occupants * self.latent_per_person * factor / Lv
+        """Vapour production [kg/s]."""
+        return self.n_occupants * self.latent_per_person * _factor(self.schedule, step) / LV
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Equipment (plug loads)
-# ══════════════════════════════════════════════════════════════════════════════
 
 @dataclass
 class EquipmentConfig:
-    """
-    Heat gains from electrical appliances (computers, TV, cooking, etc.).
-
-    Parameters
-    ----------
-    power       : float   Total installed power [W].
-    usage_factor: float   Fraction that becomes heat gain [-].  Default 1.0.
-    schedule    : list    Hourly usage factor [0–1].  None = constant.
-
-    Typical values
-    --------------
-    Residential kitchen + appliances : 200–400 W
-    Office workstation               : 100–200 W
-    """
-    power        : float                    = 200.0   # [W]
-    usage_factor : float                    = 1.0
-    schedule     : Optional[List[float]]    = None
+    """Appliances: all their power ends up as heat in the room."""
+    power    : float = 200.0              # [W]
+    schedule : Optional[List[float]] = None
 
     def heat_at(self, step: int) -> float:
-        """Sensible heat gain [W] at step `step`."""
-        factor = self.schedule[step] if self.schedule is not None else 1.0
-        return self.power * self.usage_factor * factor
+        return self.power * _factor(self.schedule, step)
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Lighting
-# ══════════════════════════════════════════════════════════════════════════════
 
 @dataclass
 class LightingConfig:
-    """
-    Artificial lighting heat gains.
-
-    Parameters
-    ----------
-    power_density : float   Installed power density [W/m²].
-    floor_area    : float   Zone floor area [m²].
-    schedule      : list    Hourly usage factor [0–1].
-
-    Typical values (EN 15193)
-    --------------------------
-    LED residential : 3–6 W/m²
-    LED office      : 6–12 W/m²
-    """
-    power_density : float                   = 5.0    # [W/m²]
-    floor_area    : float                   = 50.0   # [m²]
-    schedule      : Optional[List[float]]   = None
+    """Lighting, as a power per floor area (LED housing: 3-6 W/m²)."""
+    power_density : float = 5.0           # [W/m²]
+    floor_area    : float = 50.0          # [m²]
+    schedule      : Optional[List[float]] = None
 
     def heat_at(self, step: int) -> float:
-        factor = self.schedule[step] if self.schedule is not None else 1.0
-        return self.power_density * self.floor_area * factor
+        return self.power_density * self.floor_area * _factor(self.schedule, step)
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Ventilation
-# ══════════════════════════════════════════════════════════════════════════════
 
 @dataclass
 class VentilationConfig:
     """
-    Mechanical ventilation system.
+    Ventilation, as an air change rate n_ach [1/h] multiplied by the schedule.
 
-    Parameters
-    ----------
-    n_ach           : float   Air-change rate [1/h].
-                              Minimum hygiene: 0.5 for residential (RT2012/RE2020).
-    hrv_efficiency  : float   Heat-recovery ventilator (VMC double flux) efficiency [-].
-                              0.0 = simple exhaust (VMC simple flux)
-                              0.85 = high-efficiency HRV
-    moisture_recovery: float  Moisture recovery efficiency of the HRV [-].
-                              0.0 for simple flux, 0.5–0.7 for enthalpy exchangers.
-    air_velocity    : float   Mean indoor air velocity [m/s] — affects interior
-                              convective coefficients.  Used for comfort assessment.
-    schedule        : list    Hourly flow-rate factor [0–1].
+    hrv_efficiency, moisture_recovery : heat and moisture recovery of a balanced system
+                                        (0 for single-flow exhaust ventilation)
 
-    Note: total infiltration = n_ach + Σ opening.ach_contribution
+    Optional window opening by the occupants (overvent_ach > 0), added to n_ach, following the
+    RE2020 manual window management (method Th-BCE, Annex III §5.13): only at the steps where
+    overvent_window is True; the window opens when the room reaches T_open and closes below
+    T_close; it stays shut when the outdoor air is not cooler than the room; the opening grows
+    from 0 to 1 between T_ext_min and T_ext_full outdoors.
     """
-    n_ach             : float                   = 0.5
-    hrv_efficiency    : float                   = 0.0
-    moisture_recovery : float                   = 0.0
-    air_velocity      : float                   = 0.1   # [m/s] — indoor air speed
-    schedule          : Optional[List[float]]   = None
-    # Controlled overventilation (window opening by the occupants), added to n_ach:
-    #   allowed only at the steps where overvent_window is True; open when the room reaches
-    #   T_open, closed again below T_close (hysteresis), never when the outdoor air is not cooler
-    #   than the room, and scaled 0 → 1 between T_ext_min and T_ext_full outdoor (RE2020 manual
-    #   window management, Annex III §5.13: opening 23-25 °C, closing 22 °C, outdoor 10-18 °C).
-    overvent_ach      : float                   = 0.0
-    overvent_window   : Optional[List[bool]]    = None
-    T_open            : float                   = 23.0
-    T_close           : float                   = 22.0
-    T_ext_min         : float                   = 10.0
-    T_ext_full        : float                   = 18.0
-    _is_open          : bool                    = False
+    n_ach             : float = 0.5
+    hrv_efficiency    : float = 0.0
+    moisture_recovery : float = 0.0
+    schedule          : Optional[List[float]] = None
+
+    overvent_ach      : float = 0.0
+    overvent_window   : Optional[List[bool]] = None
+    T_open            : float = 23.0
+    T_close           : float = 22.0
+    T_ext_min         : float = 10.0
+    T_ext_full        : float = 18.0
+    _is_open          : bool  = False
 
     def flow_at(self, step: int, T_room: float = None, T_ext: float = None) -> float:
-        """Effective air-change rate [1/h] at step `step` (room and outdoor temperatures in °C
-        at the start of the step, used only by the controlled overventilation)."""
-        factor = self.schedule[step] if self.schedule is not None else 1.0
-        n = self.n_ach * factor
+        """Air change rate [1/h]; T_room and T_ext [°C] are only needed for the window opening."""
+        n = self.n_ach * _factor(self.schedule, step)
         if self.overvent_ach > 0 and self.overvent_window is not None and T_room is not None:
             if T_room >= self.T_open:
                 self._is_open = True
             elif T_room < self.T_close:
                 self._is_open = False
             if self.overvent_window[step] and self._is_open and T_ext < T_room:
-                mod = min(1.0, max(0.0, (T_ext - self.T_ext_min) / (self.T_ext_full - self.T_ext_min)))
-                n += self.overvent_ach * mod
+                opening = min(1.0, max(0.0, (T_ext - self.T_ext_min) / (self.T_ext_full - self.T_ext_min)))
+                n += self.overvent_ach * opening
         return n
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# HVAC system
-# ══════════════════════════════════════════════════════════════════════════════
 
 @dataclass
 class HVACConfig:
     """
-    Heating and cooling system.
+    Ideal heating and cooling (see RoomSimulation._thermostat).
 
-    Parameters
-    ----------
-    T_heat_set     : float   Heating setpoint [°C].  Below this → heating on.
-    T_cool_set     : float   Cooling setpoint [°C].  Above this → cooling on.
-    efficiency_heat: float   Heating system efficiency (COP for heat pump,
-                             η for boiler).  Use 1.0 for ideal electric heater.
-    efficiency_cool: float   Cooling COP.  Typical: 2.5–4.5.
-    max_power_heat : float   Maximum heating power [W].
-    max_power_cool : float   Maximum cooling power [W].
-    energy_carrier : str     'electricity' or 'gas' — used for primary energy (RE2020).
-    f_ep           : float   Primary energy conversion factor.
-                             RE2020: electricity = 2.3, gas = 1.0.
-
-    heating_control: object  Optional heating controller (see heating.RE2020Heating).
-                             It must provide
-                               heating_setpoint(step) -> setpoint [°C] or None (heating off)
-                               record(step, T_free_C, Q_heat_W, dt)
-                             When given, it replaces the constant T_heat_set (which is
-                             then only used as a fallback). None = thermostat always
-                             available at T_heat_set.
+    efficiency_heat : 1 for a direct electric heater, the COP for a heat pump
+    heating_control : optional controller (heating.RE2020Heating) that gives the heating setpoint
+                      hour by hour, or None outside the heating season; it replaces T_heat_set
     """
-    T_heat_set      : float  = 20.0
-    T_cool_set      : float  = 26.0
-    efficiency_heat : float  = 1.0     # COP or η
-    efficiency_cool : float  = 3.0     # COP
-    max_power_heat  : float  = 5000.0  # [W]
-    max_power_cool  : float  = 5000.0  # [W]
-    energy_carrier  : str    = 'electricity'
-    f_ep            : float  = 2.3     # RE2020 primary energy factor
+    T_heat_set      : float = 20.0        # [°C]
+    T_cool_set      : float = 26.0        # [°C]
+    efficiency_heat : float = 1.0
+    efficiency_cool : float = 3.0
+    max_power_heat  : float = 5000.0      # [W]
+    max_power_cool  : float = 5000.0      # [W]
+    energy_carrier  : str   = "electricity"
     heating_control : Optional[object] = None
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Vapour source (plants, cooking, drying laundry, humidifier…)
-# ══════════════════════════════════════════════════════════════════════════════
-
-@dataclass
-class VaporSourceConfig:
-    """
-    Explicit internal moisture source independent of occupants.
-
-    Parameters
-    ----------
-    rate_g_h  : float   Vapour emission rate [g/h].
-                        Typical values:
-                          Cooking (active)     : 400–700 g/h
-                          10 indoor plants     :  50–150 g/h
-                          Drying laundry       : 100–300 g/h
-                          Humidifier (domestic):  200–500 g/h
-    schedule  : list    Hourly factor [0–1] over the simulation.
-                        None = constant emission.
-
-    The latent heat added to the room air is:
-        Q_lat [W] = rate_g_h / 3600 / 1000 * Lv   (Lv = 2.5e6 J/kg)
-    """
-    rate_g_h : float                   = 100.0   # [g/h]
-    schedule : Optional[List[float]]   = None
-
-    _Lv : float = 2.5e6   # [J/kg]
-
-    def moisture_at(self, step: int) -> float:
-        """Vapour mass flow [kg/s] at step `step`."""
-        factor = self.schedule[step] if self.schedule is not None else 1.0
-        return self.rate_g_h * factor / 3600.0 / 1000.0
-
-    def latent_heat_at(self, step: int) -> float:
-        """Latent heat added to room air [W] at step `step`."""
-        return self.moisture_at(step) * self._Lv
-
-
-def build_daily_schedule(
-    hours_on: list,
-    n_steps: int,
-    dt: int = 3600,
-    value_on: float = 1.0,
-    value_off: float = 0.0,
-) -> List[float]:
-    """
-    Build an hourly schedule repeated daily over the full simulation.
-
-    Parameters
-    ----------
-    hours_on  : list of int   Hours (0–23) when the schedule is active.
-    n_steps   : int           Total number of simulation steps.
-    dt        : int           Time step [s].  Default 3600 (1 hour).
-    value_on  : float         Value during active hours.
-    value_off : float         Value during inactive hours.
-
-    Example
-    -------
-    # Occupants present 8h–22h:
-    sched = build_daily_schedule(hours_on=list(range(8, 22)), n_steps=8760)
-    """
-    hours_per_step = dt / 3600
-    schedule = []
-    for step in range(n_steps):
-        hour = int((step * hours_per_step) % 24)
-        schedule.append(value_on if hour in hours_on else value_off)
-    return schedule
+def build_daily_schedule(hours_on, n_steps, dt=3600, value_on=1.0, value_off=0.0):
+    """Same schedule every day: value_on at the hours listed in hours_on (0-23), value_off otherwise."""
+    return [value_on if int((s * dt / 3600) % 24) in hours_on else value_off for s in range(n_steps)]
